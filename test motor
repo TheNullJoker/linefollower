@@ -26,7 +26,7 @@ void IRAM_ATTR updateEncoder() {
 
 void setup() {
 
-  Serial.begin(115200);
+  Serial.begin(9600);
 
   pinMode(AIN1, OUTPUT);
   pinMode(AIN2, OUTPUT);
