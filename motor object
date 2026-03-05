@@ -1,0 +1,106 @@
+#define AIN1 12
+#define AIN2 13
+#define PWMA 4
+#define STBY 23
+
+#define ENC_A 34
+#define ENC_B 35
+
+volatile long encoderCount = 0;
+
+void IRAM_ATTR encoderISR() {
+  encoderCount++;
+}
+
+
+class MotorDriver {
+
+  private:
+    int ain1;
+    int ain2;
+    int pwm;
+
+  public:
+
+    MotorDriver(int pin1, int pin2, int pwmPin) {
+      ain1 = pin1;
+      ain2 = pin2;
+      pwm = pwmPin;
+    }
+
+    void begin() {
+      pinMode(ain1, OUTPUT);
+      pinMode(ain2, OUTPUT);
+      pinMode(pwm, OUTPUT);
+    }
+
+    void forward(int speed) {
+      digitalWrite(ain1, HIGH);
+      digitalWrite(ain2, LOW);
+      analogWrite(pwm, speed);
+    }
+
+    void backward(int speed) {
+      digitalWrite(ain1, LOW);
+      digitalWrite(ain2, HIGH);
+      analogWrite(pwm, speed);
+    }
+
+    void stop() {
+      analogWrite(pwm, 0);
+    }
+};
+
+
+class Robot {
+
+  private:
+    MotorDriver &motor;
+
+  public:
+
+    Robot(MotorDriver &m) : motor(m) {}
+
+    void forward(int speed) {
+      motor.forward(speed);
+    }
+
+    void backward(int speed) {
+      motor.backward(speed);
+    }
+
+    void stop() {
+      motor.stop();
+    }
+};
+
+
+MotorDriver motor(AIN1, AIN2, PWMA);
+Robot robot(motor);
+
+
+void setup() {
+
+  Serial.begin(9600);
+
+  pinMode(STBY, OUTPUT);
+  digitalWrite(STBY, HIGH);
+
+  pinMode(ENC_A, INPUT);
+  pinMode(ENC_B, INPUT);
+
+  attachInterrupt(digitalPinToInterrupt(ENC_A), encoderISR, RISING);
+
+  motor.begin();
+}
+
+void loop() {
+
+  robot.forward(150);
+
+  Serial.print("Encoder ticks: ");
+  Serial.println(encoderCount);
+
+  delay(200);
+
+}
