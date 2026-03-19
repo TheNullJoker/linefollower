@@ -110,6 +110,8 @@ char path[200] = "";      // Opslag van acties: 'L', 'R', 'S', 'U'
 int pathLength = 0;       // Huidige lengte van de route
 bool isDiscoveryMode = true; // TRUE = Ronde 1 (LHR), FALSE = Ronde 2/3 (Speed)
 int speedPathIndex = 0;   // Welke actie we moeten nemen in de Speed Run
+unsigned long lastIntersectionTime = 0;
+bool finishedRace = false;
 
 // =============================================================
 // SETUP
@@ -320,6 +322,94 @@ void stopMotors() {
   digitalWrite(MOTOR_B_IN1, LOW);
   digitalWrite(MOTOR_B_IN2, LOW);
   analogWrite(MOTOR_B_EN, 0);
+}
+
+void handleIntersection() {
+  // Stop heel even om de sensoren stabiel te lezen (optioneel, voor precisie)
+  // setMotorsFiltered(0, 0); 
+
+  char action;
+
+  if (isDiscoveryMode) {
+    // --- RONDE 1: LEFT HAND RULE LOGICA ---
+    if (s1) { 
+      action = 'L'; // Altijd eerst links proberen
+    } else if (s3) {
+      action = 'S'; // Dan rechtdoor
+    } else if (s5) {
+      action = 'R'; // Dan pas rechts
+    } else {
+      action = 'U'; // Doodlopend (alleen wit na kruispunt detectie)
+    }
+
+    // Sla actie op en simplify
+    path[pathLength] = action;
+    pathLength++;
+    path[pathLength] = '\0';
+    simplifyPath(); // Kort de route direct in bij een 'U'
+
+    if (DEBUG_SERIAL) Serial.print("Discovery Action: ");
+  } 
+  else {
+    // --- RONDE 2/3: SPEED RUN ---
+    if (speedPathIndex < pathLength) {
+      action = path[speedPathIndex];
+      speedPathIndex++;
+      if (DEBUG_SERIAL) Serial.print("Speed Run Action: ");
+    } else {
+      stopMotors(); // Einde van de opgeslagen route
+      finishedRace = true;
+      return;
+    }
+  }
+
+  if (DEBUG_SERIAL) Serial.println(action);
+  executeAction(action);
+}
+
+void executeAction(char action) {
+  switch (action) {
+    case 'L':
+      // Rij een klein stukje vooruit zodat de as op het kruispunt ligt
+      setMotorsFiltered(BASE_SPEED, BASE_SPEED);
+      delay(150); 
+      // Draai links tot S3 de lijn weer vindt
+      while(digitalRead(IR_S3) == HIGH) {
+        digitalWrite(MOTOR_A_IN1, LOW); digitalWrite(MOTOR_A_IN2, HIGH);
+        digitalWrite(MOTOR_B_IN1, HIGH); digitalWrite(MOTOR_B_IN2, LOW);
+        analogWrite(MOTOR_A_EN, 150); analogWrite(MOTOR_B_EN, 150);
+      }
+      break;
+
+    case 'R':
+      setMotorsFiltered(BASE_SPEED, BASE_SPEED);
+      delay(150);
+      while(digitalRead(IR_S3) == HIGH) {
+        digitalWrite(MOTOR_A_IN1, HIGH); digitalWrite(MOTOR_A_IN2, LOW);
+        digitalWrite(MOTOR_B_IN1, LOW); digitalWrite(MOTOR_B_IN2, HIGH);
+        analogWrite(MOTOR_A_EN, 150); analogWrite(MOTOR_B_EN, 150);
+      }
+      break;
+
+    case 'S':
+      // Rij gewoon een stukje "blind" voorbij het kruispunt
+      setMotorsFiltered(BASE_SPEED, BASE_SPEED);
+      delay(200); 
+      break;
+
+    case 'U':
+      // 180 graden draai
+      while(digitalRead(IR_S3) == HIGH) {
+        digitalWrite(MOTOR_A_IN1, LOW); digitalWrite(MOTOR_A_IN2, HIGH);
+        digitalWrite(MOTOR_B_IN1, HIGH); digitalWrite(MOTOR_B_IN2, LOW);
+        analogWrite(MOTOR_A_EN, 150); analogWrite(MOTOR_B_EN, 150);
+      }
+      break;
+  }
+  
+  // Na de actie: reset PID integraal om 'schokken' te voorkomen
+  integral = 0;
+  previousError = 0;
 }
 
 void simplifyPath() {
