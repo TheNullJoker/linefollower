@@ -7,11 +7,11 @@
 // =============================================================
 
 // ----- IR Sensor Pins (5-channel array, left to right) -----
-#define IR_S1 34 // Far Left (-5.0cm)
-#define IR_S2 35 // Near Left (-1.9cm)
+#define IR_S1 25 // Far Left (-5.0cm)
+#define IR_S2 33 // Near Left (-1.9cm)
 #define IR_S3 32 // Center Forward (0.0cm offset, +1.3cm up)
-#define IR_S4 33 // Near Right (+1.9cm)
-#define IR_S5 25 // Far Right (+5.0cm)
+#define IR_S4 35 // Near Right (+1.9cm)
+#define IR_S5 34 // Far Right (+5.0cm)
 
 // ----- Ultrasonic Sensor Pins (HC-SR04) -----
 #define TRIG_PIN 12
@@ -24,9 +24,9 @@
 #define MOTOR_A_IN1 26
 #define MOTOR_A_IN2 27
 // Motor B (Right)
-#define MOTOR_B_EN 15 // PWMB
-#define MOTOR_B_IN1 16
-#define MOTOR_B_IN2 17
+#define MOTOR_B_EN 18 // PWMB
+#define MOTOR_B_IN1 2
+#define MOTOR_B_IN2 15
 
 // ----- Motor Encoders -----
 #define ENC_A_L 18
