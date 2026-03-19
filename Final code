@@ -1,0 +1,351 @@
+// =============================================================
+// linefollower.ino — Unified Line Follower Program (Cy 3)
+// Board: ESP32 DevKit V1
+// =============================================================
+// Integrates: IR sensor array, ultrasonic interrupt-based,
+// advanced PID (low-pass filter, slew rate), and TB6612FNG control.
+// =============================================================
+
+// ----- IR Sensor Pins (5-channel array, left to right) -----
+#define IR_S1 34 // Far Left (-5.0cm)
+#define IR_S2 35 // Near Left (-1.9cm)
+#define IR_S3 32 // Center Forward (0.0cm offset, +1.3cm up)
+#define IR_S4 33 // Near Right (+1.9cm)
+#define IR_S5 25 // Far Right (+5.0cm)
+
+// ----- Ultrasonic Sensor Pins (HC-SR04) -----
+#define TRIG_PIN 12
+#define ECHO_PIN 13
+
+// ----- Motor Driver Pins (TB6612FNG) -----
+#define MOTOR_STBY 4 // TB6612FNG standby pin (HIGH = enabled)
+// Motor A (Left)
+#define MOTOR_A_EN 14 // PWMA
+#define MOTOR_A_IN1 26
+#define MOTOR_A_IN2 27
+// Motor B (Right)
+#define MOTOR_B_EN 15 // PWMB
+#define MOTOR_B_IN1 16
+#define MOTOR_B_IN2 17
+
+// ----- Motor Encoders -----
+#define ENC_A_L 18
+#define ENC_B_L 19
+#define ENC_A_R 21
+#define ENC_B_R 22
+
+volatile long ticksL = 0;
+volatile long ticksR = 0;
+
+void IRAM_ATTR isrEncL() {
+  if (digitalRead(ENC_A_L) == digitalRead(ENC_B_L))
+    ticksL--;
+  else
+    ticksL++;
+}
+void IRAM_ATTR isrEncR() {
+  if (digitalRead(ENC_A_R) == digitalRead(ENC_B_R))
+    ticksR++;
+  else
+    ticksR--;
+}
+
+// ----- Ultrasonic Interrupt State -----
+volatile unsigned long usPulseStart = 0;
+volatile unsigned long usPulseDuration = 0;
+volatile bool usNewData = false;
+
+void IRAM_ATTR isrEcho() {
+  if (digitalRead(ECHO_PIN) == HIGH) {
+    usPulseStart = micros();
+  } else {
+    usPulseDuration = micros() - usPulseStart;
+    usNewData = true;
+  }
+}
+
+// ----- Constants & Configuration -----
+#define BASE_SPEED 150
+#define MAX_SPEED 255
+#define MIN_SPEED 0
+#define MAX_SLEW 15 // Max PWM change per loop (limits extreme acceleration)
+#define MIN_PWM_DEADBAND 35 // Minimum PWM to overcome static friction
+#define OBSTACLE_DISTANCE_CM 15
+
+// ----- Global State & Timing -----
+int currentLeftPWM = 0;
+int currentRightPWM = 0;
+
+long lastTicksL = 0;
+long lastTicksR = 0;
+unsigned long lastStallCheck = 0;
+
+unsigned long lastUltrasonicTrigger = 0;
+const unsigned long ultrasonicInterval = 100000; // 100ms in micros
+float lastDistance = 999.0;
+
+unsigned long lastPIDTime = 0;
+unsigned long lastLoopTime = 0;
+const unsigned long loopInterval = 2000; // 500Hz fixed loop (2000 microseconds)
+
+// ----- PID Variables -----
+float Kp = 25.0;
+float Ki = 0.0;
+float Kd = 15.0;
+#define INTEGRAL_MAX 100.0
+
+float previousError = 0;
+float integral = 0;
+float D_filtered = 0;
+float alpha = 0.7; // Low-pass filter coefficient for Derivative term
+
+float lastKnownDirection = 0;
+
+#define DEBUG_SERIAL true
+#define SERIAL_BAUD 9600
+
+int s1, s2, s3, s4, s5; // Globale sensor variabelen
+// --- Mapping & Optimization State ---
+char path[200] = "";      // Opslag van acties: 'L', 'R', 'S', 'U'
+int pathLength = 0;       // Huidige lengte van de route
+bool isDiscoveryMode = true; // TRUE = Ronde 1 (LHR), FALSE = Ronde 2/3 (Speed)
+int speedPathIndex = 0;   // Welke actie we moeten nemen in de Speed Run
+
+// =============================================================
+// SETUP
+// =============================================================
+void setup() {
+  if (DEBUG_SERIAL)
+    Serial.begin(SERIAL_BAUD);
+
+  // IR Sensors
+  pinMode(IR_S1, INPUT);
+  pinMode(IR_S2, INPUT);
+  pinMode(IR_S3, INPUT);
+  pinMode(IR_S4, INPUT);
+  pinMode(IR_S5, INPUT);
+
+  // Ultrasonic
+  pinMode(TRIG_PIN, OUTPUT);
+  digitalWrite(TRIG_PIN, LOW);
+  pinMode(ECHO_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(ECHO_PIN), isrEcho, CHANGE);
+
+  // Motors (TB6612FNG uses STBY pin)
+  pinMode(MOTOR_STBY, OUTPUT);
+  digitalWrite(MOTOR_STBY, HIGH);
+  pinMode(MOTOR_A_EN, OUTPUT);
+  pinMode(MOTOR_A_IN1, OUTPUT);
+  pinMode(MOTOR_A_IN2, OUTPUT);
+  pinMode(MOTOR_B_EN, OUTPUT);
+  pinMode(MOTOR_B_IN1, OUTPUT);
+  pinMode(MOTOR_B_IN2, OUTPUT);
+  stopMotors();
+
+  // Encoders
+  pinMode(ENC_A_L, INPUT_PULLUP);
+  pinMode(ENC_B_L, INPUT_PULLUP);
+  pinMode(ENC_A_R, INPUT_PULLUP);
+  pinMode(ENC_B_R, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(ENC_A_L), isrEncL, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENC_A_R), isrEncR, RISING);
+
+  if (DEBUG_SERIAL)
+    Serial.println("High-Speed Line Follower starting (Cycle 3)...");
+}
+
+// =============================================================
+// MAIN LOOP
+// =============================================================
+void loop() {
+  unsigned long now = micros();
+
+  // Enforce rigid 500Hz execution frequency
+  if (now - lastLoopTime < loopInterval) {
+    return;
+  }
+  lastLoopTime = now;
+  s1 = digitalRead(IR_S1) == LOW ? 1 : 0;
+  s2 = digitalRead(IR_S2) == LOW ? 1 : 0;
+  s3 = digitalRead(IR_S3) == LOW ? 1 : 0;
+  s4 = digitalRead(IR_S4) == LOW ? 1 : 0;
+  s5 = digitalRead(IR_S5) == LOW ? 1 : 0;
+  // --- 1. Ultrasonic Trigger (periodic, non-blocking) ---
+  if (now - lastUltrasonicTrigger >= ultrasonicInterval) {
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+    lastUltrasonicTrigger = now;
+  }
+
+  // --- 2. Ultrasonic Data Processing ---
+  if (usNewData) {
+    lastDistance = usPulseDuration / 58.3;
+    usNewData = false;
+  }
+
+  // Emergency obstacle stop
+  if (lastDistance > 0 && lastDistance < OBSTACLE_DISTANCE_CM) {
+    stopMotors();
+    if (DEBUG_SERIAL)
+      Serial.println("OBSTACLE! STOPPED.");
+    return; // Halt logic
+  }
+
+  // --- 3. Stall Protection (Kill-Switch) ---
+  // If PWM is high but wheels aren't turning, kill the system to protect motors
+  if (now - lastStallCheck >= 100000) { // 100ms in microseconds
+    long deltaL = abs(ticksL - lastTicksL);
+    long deltaR = abs(ticksR - lastTicksR);
+
+    if ((currentLeftPWM > 50 && deltaL == 0) ||
+        (currentRightPWM > 50 && deltaR == 0)) {
+      stopMotors();
+      digitalWrite(MOTOR_STBY, LOW); // Hard disable TB6612FNG
+      while (true) {
+        if (DEBUG_SERIAL)
+          Serial.println("⛔ KILLED: Stall Detected!");
+        delay(1000);
+      }
+    }
+    lastTicksL = ticksL;
+    lastTicksR = ticksR;
+    lastStallCheck = now;
+  }
+
+  // --- 4. Read Sensors and Compute PID ---
+  // Check op kruispunt (s1 en s5 zwart) + tijd-debounce (200ms)
+  if (s1 && s2 && s4 && s5 && (now - lastIntersectionTime > 200000)) {
+    
+    handleIntersection(); // Hier springt hij uit de PID om een bocht te maken en te loggen
+    lastIntersectionTime = micros(); // Reset de timer
+
+  } else {
+    // --- NORMALE PID LIJNVOLGER ---
+    // Dit voert hij uit zolang er GEEN kruispunt is
+    
+    float error = calculateLineError();
+    float correction = calculatePID(error, now);
+
+    // Bereken target snelheden op basis van PID
+    int targetLeft = constrain(BASE_SPEED + correction, MIN_SPEED, MAX_SPEED);
+    int targetRight = constrain(BASE_SPEED - correction, MIN_SPEED, MAX_SPEED);
+
+    // Stuur de motoren aan met je Slew Rate filter
+    setMotorsFiltered(targetLeft, targetRight);
+  }
+  
+}
+
+// =============================================================
+// SENSOR & ALGORITHM ABSTRACTIONS
+// =============================================================
+float calculateLineError() {
+  
+
+  int activeSensors = s1 + s2 + s3 + s4 + s5;
+
+  if (activeSensors == 0)
+    return lastKnownDirection;
+
+  float weightedSum =
+      (s1 * -5.0) + (s2 * -1.9) + (s3 * 0.0) + (s4 * 1.9) + (s5 * 5.0);
+  float error = weightedSum / activeSensors;
+  lastKnownDirection = error;
+
+  return error;
+}
+
+float calculatePID(float error, unsigned long now) {
+  // Use exact time delta for precision at high frequencies
+  float dt = (now - lastPIDTime) / 1000000.0; // convert microseconds to seconds
+  if (dt <= 0.0)
+    dt = 0.001; // Avoid divide by zero
+  lastPIDTime = now;
+
+  float P = Kp * error;
+
+  integral += error * dt;
+  integral = constrain(integral, -INTEGRAL_MAX, INTEGRAL_MAX);
+  float I = Ki * integral;
+
+  // Filtered Derivative to soften high-freq noise (alpha ~ 0.7)
+  float D_raw = (error - previousError) / dt;
+  D_filtered = (alpha * D_raw) + ((1.0 - alpha) * D_filtered);
+  float D = Kd * D_filtered;
+
+  previousError = error;
+  return P + I + D;
+}
+
+void setMotorsFiltered(int targetLeft, int targetRight) {
+  // Slew Rate Limiting prevents violent current spikes
+  if (targetLeft > currentLeftPWM)
+    currentLeftPWM = min(targetLeft, currentLeftPWM + MAX_SLEW);
+  else
+    currentLeftPWM = max(targetLeft, currentLeftPWM - MAX_SLEW);
+
+  if (targetRight > currentRightPWM)
+    currentRightPWM = min(targetRight, currentRightPWM + MAX_SLEW);
+  else
+    currentRightPWM = max(targetRight, currentRightPWM - MAX_SLEW);
+
+  // Apply PWM Deadband (ensure we output enough to overcome static friction)
+  int outLeft = abs(currentLeftPWM);
+  if (outLeft > 0 && outLeft < MIN_PWM_DEADBAND)
+    outLeft = MIN_PWM_DEADBAND;
+
+  int outRight = abs(currentRightPWM);
+  if (outRight > 0 && outRight < MIN_PWM_DEADBAND)
+    outRight = MIN_PWM_DEADBAND;
+
+  // TB6612FNG Control
+  digitalWrite(MOTOR_A_IN1, currentLeftPWM >= 0 ? HIGH : LOW);
+  digitalWrite(MOTOR_A_IN2, currentLeftPWM >= 0 ? LOW : HIGH);
+  analogWrite(MOTOR_A_EN, outLeft);
+
+  digitalWrite(MOTOR_B_IN1, currentRightPWM >= 0 ? HIGH : LOW);
+  digitalWrite(MOTOR_B_IN2, currentRightPWM >= 0 ? LOW : HIGH);
+  analogWrite(MOTOR_B_EN, outRight);
+}
+
+void stopMotors() {
+  currentLeftPWM = 0;
+  currentRightPWM = 0;
+  digitalWrite(MOTOR_A_IN1, LOW);
+  digitalWrite(MOTOR_A_IN2, LOW);
+  analogWrite(MOTOR_A_EN, 0);
+  digitalWrite(MOTOR_B_IN1, LOW);
+  digitalWrite(MOTOR_B_IN2, LOW);
+  analogWrite(MOTOR_B_EN, 0);
+}
+
+void simplifyPath() {
+  // We hebben minimaal 3 acties nodig om te kunnen vereenvoudigen (bijv. L, U, R)
+  if (pathLength < 3 || path[pathLength - 2] != 'U') {
+    return;
+  }
+
+  char a = path[pathLength - 3]; // Actie vóór de doodlopende weg
+  char b = path[pathLength - 2]; // De U-turn zelf
+  char c = path[pathLength - 1]; // De actie na de U-turn
+
+  char replacement = ' ';
+
+  // Gebaseerd op Maze-Solving logica:
+  if (a == 'L' && c == 'L') replacement = 'S'; // LUL = S
+  else if (a == 'L' && c == 'S') replacement = 'R'; // LUS = R
+  else if (a == 'R' && c == 'L') replacement = 'U'; // RUL = U (nog steeds doodlopend)
+  else if (a == 'S' && c == 'L') replacement = 'R'; // SUL = R
+  else if (a == 'S' && c == 'S') replacement = 'U'; // SUS = U
+  else if (a == 'L' && c == 'R') replacement = 'U'; // LUR = U
+
+  if (replacement != ' ') {
+    pathLength -= 3;             // Verwijder de laatste 3
+    path[pathLength] = replacement; // Voeg de nieuwe kortere actie toe
+    pathLength++;                // Update lengte
+    path[pathLength] = '\0';     // Sluit de string netjes af
+  }
+}
