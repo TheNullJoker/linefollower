@@ -29,10 +29,10 @@
 #define MOTOR_B_IN2 15
 
 // ----- Motor Encoders -----
-#define ENC_A_L 18
-#define ENC_B_L 19
-#define ENC_A_R 21
-#define ENC_B_R 22
+#define ENC_A_L 19
+#define ENC_B_L 21
+#define ENC_A_R 22
+#define ENC_B_R 23
 
 volatile long ticksL = 0;
 volatile long ticksR = 0;
