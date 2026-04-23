@@ -2,10 +2,14 @@
 // Lijnvolg-robot met PID-regelaar - ESP32 + TB6612FNG
 // Competitie: 25 februari 2026
 // ============================================================
-// OPMERKING OVER PIN-CONFLICT:
-//   Motor B PWM-pin (18) en Encoder Links A-pin (18) zijn
-//   identiek zoals opgegeven in de pinmap. Controleer de
-//   hardware-bedrading en pas indien nodig één van beide aan.
+// LET OP – PIN-CONFLICT IN DE OPGEGEVEN PINMAP:
+//   Motor B PWM (pin 18) en Encoder Links A (pin 18) zijn
+//   identiek. De ESP32 kan dezelfde GPIO niet tegelijk als
+//   LEDC-PWM-uitgang én als interrupt-ingang gebruiken.
+//   Aanbevolen oplossing: gebruik pin 23 voor ENC_L_A en
+//   pas de bedrading aan. De definitie hieronder gebruikt al
+//   pin 23 als veilige standaard; wijzig naar 18 als je de
+//   motorencoder niet nodig hebt of een andere PWM-pin kiest.
 // ============================================================
 
 // ------------------------------------------------------------
@@ -41,7 +45,10 @@
 // ------------------------------------------------------------
 // Pin-definities – Encoders
 // ------------------------------------------------------------
-#define ENC_L_A 18   // Let op: zelfde als PWMB_PIN – zie opmerking bovenaan
+// ENC_L_A is gewijzigd naar pin 23 om het conflict met
+// PWMB_PIN (18) te vermijden. Pas aan als je hardware
+// een andere vrije pin gebruikt.
+#define ENC_L_A 23
 #define ENC_L_B 19
 #define ENC_R_A 21
 #define ENC_R_B 22
@@ -463,11 +470,21 @@ void behandelLijnZoeken() {
 // pas ONTWIJKING_MS_* aan voor jouw robot.
 // ============================================================
 
-// Tijdsduren voor ontwijkingsmanoeuvre (ms) – aan te passen per robot
+// Tijdsduren voor ontwijkingsmanoeuvre (ms) – aan te passen per robot.
+// Kalibratie-tips:
+//   ONTWIJKING_ACHTERUIT_MS : rijd ~5 cm achteruit bij DRAAI_SNELHEID.
+//   ONTWIJKING_DRAAI90_MS   : draai precies 90° op de as bij DRAAI_SNELHEID.
+//                             Meet de draaitijd op een vlakke ondergrond.
+//   ONTWIJKING_ZIJWAARTS_MS : rijd minstens 25 cm zijwaarts (obstakeldiameter
+//                             20 cm + marge) bij BASISSNELHEID.
+//   ONTWIJKING_OVERKANT_MS  : rijd de lijn voorbij (~30 cm) bij BASISSNELHEID.
 const int ONTWIJKING_ACHTERUIT_MS  =  300;
 const int ONTWIJKING_DRAAI90_MS    =  400;
 const int ONTWIJKING_ZIJWAARTS_MS  =  600;
 const int ONTWIJKING_OVERKANT_MS   =  700;
+
+// Time-out voor het terugzoeken naar de lijn na obstakelontwijking
+const int LIJN_ZOEK_TIMEOUT_MS     = 3000;
 
 void avoidObstacle() {
   Serial.println("Obstakelontwijking: start");
@@ -503,7 +520,7 @@ void avoidObstacle() {
   motorControl(BASISSNELHEID, BASISSNELHEID);
   while (alleSensorsWit()) {
     readSensors();
-    if (millis() - startTijd > 3000) break;  // Veiligheidstime-out: 3 s
+    if (millis() - startTijd > LIJN_ZOEK_TIMEOUT_MS) break;  // Veiligheidstime-out
     delay(10);
   }
 
