@@ -1,25 +1,8 @@
-// ============================================================
-// Lijnvolg-robot met PID-regelaar - ESP32 + TB6612FNG
-// Competitie: 25 februari 2026
-// ============================================================
-// LET OP – PIN-CONFLICT IN DE OPGEGEVEN PINMAP:
-//   Motor B PWM (pin 18) en Encoder Links A (pin 18) zijn
-//   identiek. De ESP32 kan dezelfde GPIO niet tegelijk als
-//   LEDC-PWM-uitgang én als interrupt-ingang gebruiken.
-//   Aanbevolen oplossing: gebruik pin 23 voor ENC_L_A en
-//   pas de bedrading aan. De definitie hieronder gebruikt al
-//   pin 23 als veilige standaard; wijzig naar 18 als je de
-//   motorencoder niet nodig hebt of een andere PWM-pin kiest.
-// ============================================================
-
-// ------------------------------------------------------------
-// Pin-definities – IR-sensoren
-// ------------------------------------------------------------
-#define S1_PIN 25   // Meest links (Far Left)
-#define S2_PIN 33   // Links (Near Left)
+#define S1_PIN 34  // Meest links (Far Left)
+#define S2_PIN 35   // Links (Near Left)
 #define S3_PIN 32   // Midden (Center)
-#define S4_PIN 35   // Rechts (Near Right)
-#define S5_PIN 34   // Meest rechts (Far Right)
+#define S4_PIN 33   // Rechts (Near Right)
+#define S5_PIN 25   // Meest rechts (Far Right)
 
 // ------------------------------------------------------------
 // Pin-definities – Motor Driver TB6612FNG
@@ -49,9 +32,9 @@
 // PWMB_PIN (18) te vermijden. Pas aan als je hardware
 // een andere vrije pin gebruikt.
 #define ENC_L_A 23
-#define ENC_L_B 19
+#define ENC_L_B 22
 #define ENC_R_A 21
-#define ENC_R_B 22
+#define ENC_R_B 19
 
 // ------------------------------------------------------------
 // PWM-kanalen (ESP32 ledc API)
