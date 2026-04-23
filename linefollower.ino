@@ -37,10 +37,12 @@
 #define ENC_R_B 19
 
 // ------------------------------------------------------------
-// PWM-kanalen (ESP32 ledc API)
+// PWM-instellingen (ESP32 LEDC)
 // ------------------------------------------------------------
-#define PWM_CHANNEL_A    0
-#define PWM_CHANNEL_B    1
+// Let op: Nieuwere Arduino-ESP32 cores gebruiken een pin-gebaseerde LEDC API:
+//   ledcAttach(pin, freq, resolutionBits)
+//   ledcWrite(pin, duty)
+// Daarom gebruiken we hier geen kanaal-IDs meer.
 #define PWM_FREQ       1000   // Hz
 #define PWM_RESOLUTION    8   // bits (0-255)
 
@@ -136,11 +138,10 @@ void setup() {
   pinMode(BIN1_PIN, OUTPUT);
   pinMode(BIN2_PIN, OUTPUT);
 
-  // PWM-kanalen instellen (ESP32 ledc)
-  ledcSetup(PWM_CHANNEL_A, PWM_FREQ, PWM_RESOLUTION);
-  ledcSetup(PWM_CHANNEL_B, PWM_FREQ, PWM_RESOLUTION);
-  ledcAttachPin(PWMA_PIN, PWM_CHANNEL_A);
-  ledcAttachPin(PWMB_PIN, PWM_CHANNEL_B);
+  // PWM instellen (ESP32 LEDC - nieuwe API)
+  // Attach/configure PWM directly on the pins.
+  ledcAttach(PWMA_PIN, PWM_FREQ, PWM_RESOLUTION);
+  ledcAttach(PWMB_PIN, PWM_FREQ, PWM_RESOLUTION);
 
   // Ultrasone sensor
   pinMode(TRIG_PIN, OUTPUT);
@@ -282,7 +283,7 @@ void motorControl(int links, int rechts) {
     digitalWrite(AIN2_PIN, HIGH);
     links = -links;
   }
-  ledcWrite(PWM_CHANNEL_A, links);
+  ledcWrite(PWMA_PIN, links);
 
   // Motor B – Rechts
   if (rechts >= 0) {
@@ -293,7 +294,7 @@ void motorControl(int links, int rechts) {
     digitalWrite(BIN2_PIN, HIGH);
     rechts = -rechts;
   }
-  ledcWrite(PWM_CHANNEL_B, rechts);
+  ledcWrite(PWMB_PIN, rechts);
 
   // Standby activeren (motoren rijden)
   digitalWrite(STBY_PIN, HIGH);
@@ -304,8 +305,8 @@ void motorControl(int links, int rechts) {
 // Stopt beide motoren en schakelt standby in.
 // ============================================================
 void motorStop() {
-  ledcWrite(PWM_CHANNEL_A, 0);
-  ledcWrite(PWM_CHANNEL_B, 0);
+  ledcWrite(PWMA_PIN, 0);
+  ledcWrite(PWMB_PIN, 0);
   digitalWrite(AIN1_PIN, LOW);
   digitalWrite(AIN2_PIN, LOW);
   digitalWrite(BIN1_PIN, LOW);
