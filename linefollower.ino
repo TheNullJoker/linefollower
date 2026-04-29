@@ -63,10 +63,10 @@
 // ------------------------------------------------------------
 // PID-parameters – pas Kp, Ki en Kd aan voor je robot
 // ------------------------------------------------------------
-float Kp = 25.0;
+float Kp = 15.0;
 float Ki =  0.0;
 float Kd = 15.0;
-const float KP_ZIGZAG = 50.0;  // Verhoogde Kp bij zigzag/scherpe bocht (S3 vroegwaarschuwing)
+const float KP_ZIGZAG = 30.0;  // Verhoogde Kp bij zigzag/scherpe bocht (S3 vroegwaarschuwing)
 
 // ------------------------------------------------------------
 // Rijsnelheid-instellingen (0-255)
@@ -74,13 +74,13 @@ const float KP_ZIGZAG = 50.0;  // Verhoogde Kp bij zigzag/scherpe bocht (S3 vroe
 const int BASISSNELHEID      = 120; // Normale rijsnelheid
 const int MAX_SNELHEID       = 200; // Maximale motorsnelheid
 const int MIN_SNELHEID       = 45;  // Minimale PWM om motor-stall te voorkomen (afstemmen!)
-const int DRAAI_SNELHEID     = 90;  // Snelheid bij zoeken na lijnverlies
+const int DRAAI_SNELHEID     = 130;  // Snelheid bij zoeken na lijnverlies
 const int OBSTAKEL_AFSTAND   = 20;  // cm – trigger obstakelontwijking
 
 // ------------------------------------------------------------
 // Doodlopend einde / labyrinth-constanten
 // ------------------------------------------------------------
-const unsigned long LIJN_KWIJT_DOODLOPEND_MS = 1000;  // ms lijn kwijt → doodlopend einde
+const unsigned long LIJN_KWIJT_DOODLOPEND_MS = 2500;  // ms lijn kwijt → doodlopend einde
 const long   TICKS_VOOR_180_GRADEN           = 120;   // Encoderticks voor 180° (kalibreren!)
 const int    MAX_LABYRINTH_BESLISSINGEN       = 50;    // Max. opgeslagen kruispuntbeslissingen
 
@@ -129,7 +129,7 @@ int   laatsteBekendeRichting = 0;  // -1=links, +1=rechts, 0=midden
 // Globale variabelen – lijnzoeken
 // ------------------------------------------------------------
 int   zoekTeller = 0;
-const int MAX_ZOEK_ITERATIES = 80;  // ~800 ms bij 10 ms lus
+const int MAX_ZOEK_ITERATIES = 250;  // ~2.5 s bij 10 ms lus
 
 // ------------------------------------------------------------
 // Globale variabelen – encoders
