@@ -66,7 +66,6 @@
 float Kp = 15.0;
 float Ki =  0.0;
 float Kd = 15.0;
-const float KP_ZIGZAG = 30.0;  // Verhoogde Kp bij zigzag/scherpe bocht (S3 vroegwaarschuwing)
 
 // ------------------------------------------------------------
 // Rijsnelheid-instellingen (0-255)
@@ -116,7 +115,21 @@ float fout         = 0.0;
 float vorigeFout   = 0.0;
 float integraal    = 0.0;
 float pidUitvoer   = 0.0;
-bool  scherpeBochtModus = false;  // true = S3 vroegwaarschuwing actief
+
+// ------------------------------------------------------------
+// Globale variabelen – zigzag bypass
+// ------------------------------------------------------------
+int  zigzagTeller       = 0;   // Telt snelle buitensensor-uitvallers
+bool zigzagModusActief  = false;
+int  zigzagStabielTeller = 0;  // Telt stabiele cycli om zigzag te verlaten
+const int ZIGZAG_DREMPEL  = 3;  // Aantal uitvallers om bypass te activeren
+const int ZIGZAG_STABIEL  = 10; // Stabiele cycli vereist om bypass te deactiveren
+
+// ------------------------------------------------------------
+// Globale variabelen – geforceerde kruispuntrichting (Y-splitsing terugrijden)
+// ------------------------------------------------------------
+bool geforceerdeRichting      = false;  // true = negeer linkse-handregel
+char geforceerdeRichtingWaarde = '\0';  // Te gebruiken richting
 
 // ------------------------------------------------------------
 // Globale variabelen – motorsnelheden & richting
@@ -383,7 +396,6 @@ float berekenLijnPositie() {
 // ============================================================
 // calculatePID()
 // Berekent de PID-correctie op basis van de lijnpositie.
-// Gebruikt een verhoogde Kp in zigzag/scherpe-bocht-modus.
 // ============================================================
 float calculatePID(float positie) {
   float huidigeFout = positie;  // Fout = afwijking van midden (0)
@@ -394,9 +406,7 @@ float calculatePID(float positie) {
 
   float afgeleide = huidigeFout - vorigeFout;
 
-  // Verhoog Kp tijdelijk als zigzag/scherpe bocht gedetecteerd (S3 vroegwaarschuwing)
-  float effectieveKp = scherpeBochtModus ? KP_ZIGZAG : Kp;
-  pidUitvoer = (effectieveKp * huidigeFout) + (Ki * integraal) + (Kd * afgeleide);
+  pidUitvoer = (Kp * huidigeFout) + (Ki * integraal) + (Kd * afgeleide);
 
   vorigeFout = huidigeFout;
   return pidUitvoer;
@@ -597,14 +607,39 @@ void behandelLijnVolgen() {
     kruispuntVerwerkt = false;
   }
 
-  // --- Zigzag / scherpe-bocht-detectie via S3 (verder vooruit gemonteerd) ---
-  // Trigger als S3 op lijn staat EN een buitensensor zojuist van de lijn afviel.
+  // --- Zigzag-detectie en bypass (rechtdoor rijden) ---
+  // Triggers: S3 op lijn EN een buitensensor valt zojuist af (snelle slingers).
+  // Zodra ZIGZAG_DREMPEL aflossingen zijn geteld: rij rechtdoor tot lijn stabiliseert.
   bool s1Uitgevallen = vorigeSensorOpLijn[0] && !sensorOpLijn[0];
   bool s5Uitgevallen = vorigeSensorOpLijn[4] && !sensorOpLijn[4];
+
   if (sensorOpLijn[2] && (s1Uitgevallen || s5Uitgevallen)) {
-    scherpeBochtModus = true;
-  } else {
-    scherpeBochtModus = false;  // Expliciet resetten als triggerconditie niet meer geldt
+    // Snelle uitvaller gedetecteerd
+    zigzagTeller++;
+    zigzagStabielTeller = 0;
+    if (zigzagTeller >= ZIGZAG_DREMPEL) {
+      zigzagModusActief = true;
+      zigzagTeller      = 0;
+      Serial.println("Zigzag gedetecteerd – rechtdoor rijden.");
+    }
+  } else if (zigzagModusActief && sensorOpLijn[2] && !s1Uitgevallen && !s5Uitgevallen) {
+    // Lijn stabiel onder S3, tel stabiele cycli
+    zigzagStabielTeller++;
+    if (zigzagStabielTeller >= ZIGZAG_STABIEL) {
+      zigzagModusActief   = false;
+      zigzagTeller        = 0;
+      zigzagStabielTeller = 0;
+      Serial.println("Zigzag voorbij – PID hervat.");
+    }
+  } else if (!zigzagModusActief) {
+    // Buiten zigzag-modus: wis teller bij elke stabiele cyclus
+    zigzagTeller = 0;
+  }
+
+  if (zigzagModusActief) {
+    // Negeer PID: rij rechtdoor om door de zigzag te 'snijden'
+    motorControl(BASISSNELHEID, BASISSNELHEID);
+    return;
   }
 
   // --- Normaal lijnvolgen via PID ---
@@ -712,8 +747,12 @@ void behandelKruispunt() {
         kruispuntRechtdoorOptie = sensorOpLijn[2];
         kruispuntRechtsOptie    = sensorOpLijn[3] || sensorOpLijn[4];
 
-        // Kies richting: herhaalstand of verkenstand (linkse-handregel)
-        if (herhaalmodus && huidigLabyrinthIndex < aantalLabyrinthBeslissingen) {
+        // Kies richting: geforceerd (terugrijden), herhaalstand of verkenstand (linkse-handregel)
+        if (geforceerdeRichting) {
+          gekozenKruispuntRichting = geforceerdeRichtingWaarde;
+          geforceerdeRichting      = false;
+          Serial.print("Kruispunt (geforceerd na terugrijden) – richting: ");
+        } else if (herhaalmodus && huidigLabyrinthIndex < aantalLabyrinthBeslissingen) {
           gekozenKruispuntRichting = labyrinthPad[huidigLabyrinthIndex++];
           Serial.print("Kruispunt (herhaal) – richting: ");
         } else {
@@ -828,14 +867,47 @@ void behandelDoodlopendEinde() {
 // ============================================================
 // behandelTerugrijden()
 // Volgt de lijn terug naar het vorige kruispunt.
-// Bij detectie van het kruispunt (S1+S5 beide LOW) wordt
-// opnieuw de KRUISPUNT-toestand ingegaan (nu met linkse-handregel
-// vanuit de nieuwe rijrichting).
+// Bij detectie van het kruispunt wordt de geforceerde richting
+// bepaald op basis van de laatste beslissing in labyrinthPad,
+// zodat de robot de onverkende tak neemt en niet terugrijdt
+// op de originele hoofdlijn.
 // ============================================================
 void behandelTerugrijden() {
-  // Vorig kruispunt bereikt: buitenste sensoren beide op lijn
-  if (isKruispuntGedetecteerd()) {
+  // --- Kruispunt-detectie (ook van de andere kant van een Y-splitsing) ---
+  // Standaard: beide buitensensoren op lijn.
+  // Extra: één buitensensor + midden + ≥3 sensoren (Y van de doodlopende kant).
+  bool kruispuntGezien = isKruispuntGedetecteerd();
+  if (!kruispuntGezien) {
+    int aantalOpLijn = 0;
+    for (int i = 0; i < 5; i++) if (sensorOpLijn[i]) aantalOpLijn++;
+    kruispuntGezien = (sensorOpLijn[0] || sensorOpLijn[4])
+                      && sensorOpLijn[2]
+                      && aantalOpLijn >= 3
+                      && !alleSensorsZwart();
+  }
+
+  if (kruispuntGezien) {
     Serial.println("Vorig kruispunt bereikt – alternatieve route bepalen.");
+
+    // Bepaal de geforceerde richting op basis van de laatste opgeslagen beslissing.
+    // labyrinthPad eindigt op [..., <vorigeRichting>, 'U']
+    // Wis de 'U' en de vorige richting; KRUISPUNT voegt de nieuwe richting toe.
+    if (!herhaalmodus && aantalLabyrinthBeslissingen >= 2 &&
+        labyrinthPad[aantalLabyrinthBeslissingen - 1] == 'U') {
+      char vorigeRichting = labyrinthPad[aantalLabyrinthBeslissingen - 2];
+      // Verwijder beide entries; KRUISPUNT voegt de nieuwe beslissing toe
+      aantalLabyrinthBeslissingen -= 2;
+      // Tegenovergestelde richting kiezen
+      if      (vorigeRichting == 'L') geforceerdeRichtingWaarde = 'R';
+      else if (vorigeRichting == 'R') geforceerdeRichtingWaarde = 'L';
+      else                            geforceerdeRichtingWaarde = 'U';
+      geforceerdeRichting = true;
+      Serial.print("Geforceerde richting (was ");
+      Serial.print(vorigeRichting);
+      Serial.print("): ");
+      Serial.println(geforceerdeRichtingWaarde);
+    }
+
     encoderLinksOpKruispunt  = encoderLinks;
     encoderRechtsOpKruispunt = encoderRechts;
     kruispuntFase      = KF_VOORUIT_CENTEREN;
