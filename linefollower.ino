@@ -5,6 +5,15 @@
 #define S5_PIN 25   // Meest rechts (Far Right)
 
 // ------------------------------------------------------------
+// Pin-definities – Knop (start / later mode)
+// ------------------------------------------------------------
+// DOIT ESP32 DevKit v1: D5 = GPIO5
+// Sluit knop aan tussen GPIO5 en GND.
+// We gebruiken INPUT_PULLUP => ingedrukt = LOW.
+// Let op: GPIO5 is een strapping pin; vermijd reboot/flash terwijl je de knop ingedrukt houdt.
+#define BTN_PIN 5
+
+// ------------------------------------------------------------
 // Pin-definities – Motor Driver TB6612FNG
 // ------------------------------------------------------------
 #define STBY_PIN  4   // Standby (HIGH = actief)
@@ -91,6 +100,34 @@ const int MAX_ZOEK_ITERATIES = 80;  // ~800 ms bij 10 ms lus
 volatile long encoderLinks  = 0;
 volatile long encoderRechts = 0;
 
+// ------------------------------------------------------------
+// Knop (debounce + edge detect)
+// ------------------------------------------------------------
+bool knopStaatIngedrukt = false;
+bool vorigeKnopStaatIngedrukt = false;
+unsigned long laatsteDebounceTijd = 0;
+const unsigned long DEBOUNCE_MS = 30;
+
+// Geeft true terug bij een "nieuwe druk" (edge: niet-ingedrukt -> ingedrukt)
+bool knopPressedEvent() {
+  bool rawPressed = (digitalRead(BTN_PIN) == LOW);
+
+  // debounce: bij verandering timer resetten
+  if (rawPressed != knopStaatIngedrukt) {
+    laatsteDebounceTijd = millis();
+    knopStaatIngedrukt = rawPressed;
+  }
+
+  // pas na debounce tijd beschouwen we het als stabiel
+  if (millis() - laatsteDebounceTijd < DEBOUNCE_MS) {
+    return false;
+  }
+
+  bool event = (!vorigeKnopStaatIngedrukt && knopStaatIngedrukt);
+  vorigeKnopStaatIngedrukt = knopStaatIngedrukt;
+  return event;
+}
+
 // Toestandsmachine
 enum RijToestand {
   WACHT_OP_START,
@@ -128,6 +165,9 @@ void setup() {
   pinMode(S4_PIN, INPUT);
   pinMode(S5_PIN, INPUT);
 
+  // Knop
+  pinMode(BTN_PIN, INPUT_PULLUP);
+
   // Motor-standby
   pinMode(STBY_PIN, OUTPUT);
   digitalWrite(STBY_PIN, LOW);  // Motoren uitgeschakeld tot start
@@ -158,7 +198,7 @@ void setup() {
   // Motoren stoppen
   motorStop();
 
-  Serial.println("Robot gereed. Wacht op startsignaal (alle sensoren op lijn)...");
+  Serial.println("Robot gereed. Druk op de knop om te starten...");
 }
 
 // ============================================================
@@ -332,18 +372,16 @@ float meetAfstand() {
 
 // ============================================================
 // behandelWachtOpStart()
-// De robot staat stil en wacht tot hij op de lijn staat.
-// Zodra minstens één sensor zwart detecteert, start de robot.
+// Robot staat stil en wacht op knopdruk om te starten.
 // ============================================================
 void behandelWachtOpStart() {
-  bool eenOpLijn = false;
-  for (int i = 0; i < 5; i++) {
-    if (sensorOpLijn[i]) { eenOpLijn = true; break; }
-  }
-  if (eenOpLijn) {
-    Serial.println("Lijn gedetecteerd – robot start!");
+  motorStop();  // extra zekerheid
+
+  if (knopPressedEvent()) {
+    Serial.println("Knop ingedrukt – robot start!");
     integraal  = 0.0;
     vorigeFout = 0.0;
+    zoekTeller = 0;
     toestand   = LIJN_VOLGEN;
   }
 }
@@ -353,6 +391,14 @@ void behandelWachtOpStart() {
 // Normaal rijgedrag: PID + obstakel- en finishcontrole.
 // ============================================================
 void behandelLijnVolgen() {
+  // (Optioneel handige testfunctie) knop = pauze/stop
+  if (knopPressedEvent()) {
+    Serial.println("Knop ingedrukt – robot pauze/stop (terug naar WACHT_OP_START)");
+    motorStop();
+    toestand = WACHT_OP_START;
+    return;
+  }
+
   // --- Finish: alle sensoren zwart ---
   if (alleSensorsZwart()) {
     Serial.println("FINISH gedetecteerd – robot stopt!");
