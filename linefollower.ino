@@ -56,15 +56,15 @@ float Kd = 15.0;
 // ------------------------------------------------------------
 // Rijsnelheid-instellingen (0-255)
 // ------------------------------------------------------------
-const int BASISSNELHEID      = 140;  // Normale rijsnelheid
-const int MAX_SNELHEID       = 200;  // Maximale motorsnelheid
-const int DRAAI_SNELHEID     = 120;  // Snelheid bij zoeken na lijnverlies
-const int OBSTAKEL_AFSTAND   =  30;  // cm – trigger obstakelontwijking
+const int BASISSNELHEID      = 60;  // Normale rijsnelheid
+const int MAX_SNELHEID       = 90;  // Maximale motorsnelheid
+const int DRAAI_SNELHEID     = 50;  // Snelheid bij zoeken na lijnverlies
+const int OBSTAKEL_AFSTAND   =  20;  // cm – trigger obstakelontwijking
 
 // ------------------------------------------------------------
 // Sensorposities in cm (offset t.o.v. midden)
 // ------------------------------------------------------------
-const float SENSOR_POS[5] = { -4.0, -2.0, 0.0, 2.0, 4.0 };
+const float SENSOR_POS[5] = { -5.0, -1.9, 0.0, 1.9, 5.0 };
 
 // ------------------------------------------------------------
 // Globale variabelen
