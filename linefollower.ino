@@ -71,10 +71,10 @@ const float KP_ZIGZAG = 50.0;  // Verhoogde Kp bij zigzag/scherpe bocht (S3 vroe
 // ------------------------------------------------------------
 // Rijsnelheid-instellingen (0-255)
 // ------------------------------------------------------------
-const int BASISSNELHEID      = 60;  // Normale rijsnelheid
-const int MAX_SNELHEID       = 90;  // Maximale motorsnelheid
-const int MIN_SNELHEID       = 40;  // Minimale PWM om motor-stall te voorkomen (afstemmen!)
-const int DRAAI_SNELHEID     = 50;  // Snelheid bij zoeken na lijnverlies
+const int BASISSNELHEID      = 120; // Normale rijsnelheid
+const int MAX_SNELHEID       = 200; // Maximale motorsnelheid
+const int MIN_SNELHEID       = 45;  // Minimale PWM om motor-stall te voorkomen (afstemmen!)
+const int DRAAI_SNELHEID     = 90;  // Snelheid bij zoeken na lijnverlies
 const int OBSTAKEL_AFSTAND   = 20;  // cm – trigger obstakelontwijking
 
 // ------------------------------------------------------------
