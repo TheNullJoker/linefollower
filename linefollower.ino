@@ -3,11 +3,11 @@
 // ============================================================
 // Pin-definities – IR-sensoren (LOW = lijn/zwart)
 // ============================================================
-#define S1_PIN 34  // Meest links (Far Left)
-#define S2_PIN 35  // Links (Near Left)
-#define S3_PIN 32  // Midden (Center) – iets verder vooruit gemonteerd
-#define S4_PIN 33  // Rechts (Near Right)
-#define S5_PIN 25  // Meest rechts (Far Right)
+#define S1_PIN 25  // Meest links (Far Left)
+#define S2_PIN 33   // Links (Near Left)
+#define S3_PIN 32   // Midden (Center) - iets naar voor
+#define S4_PIN 35   // Rechts (Near Right)
+#define S5_PIN 34   // Meest rechts (Far Right)
 
 // ------------------------------------------------------------
 // Pin-definities – Knop (start / later mode)
