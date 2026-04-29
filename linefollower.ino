@@ -209,6 +209,7 @@ void behandelKruispunt();
 void behandelDoodlopendEinde();
 void behandelTerugrijden();
 char bepaalKruispuntRichtingLinkseHand();
+bool isKruispuntGedetecteerd();
 void slaOpLabyrinthPad();
 bool laadLabyrinthPad();
 void wisLabyrinthPad();
@@ -521,6 +522,8 @@ void behandelWachtOpStart() {
     integraal  = 0.0;
     vorigeFout = 0.0;
     zoekTeller = 0;
+    // Consumeer de knopstaat zodat een volgende kortere druk geen spurious event geeft
+    vorigeKnopStaatIngedrukt = knopStaatIngedrukt;
     toestand   = LIJN_VOLGEN;
     return;
   }
@@ -578,7 +581,7 @@ void behandelLijnVolgen() {
 
   // --- Kruispunt-detectie: buitenste sensoren beide op lijn ---
   // (Y-kruispunt, T-kruising of volledige kruising)
-  if (sensorOpLijn[0] && sensorOpLijn[4] && !alleSensorsZwart() && !kruispuntVerwerkt) {
+  if (isKruispuntGedetecteerd() && !kruispuntVerwerkt) {
     Serial.println("Kruispunt gedetecteerd!");
     encoderLinksOpKruispunt  = encoderLinks;
     encoderRechtsOpKruispunt = encoderRechts;
@@ -598,7 +601,11 @@ void behandelLijnVolgen() {
   // Trigger als S3 op lijn staat EN een buitensensor zojuist van de lijn afviel.
   bool s1Uitgevallen = vorigeSensorOpLijn[0] && !sensorOpLijn[0];
   bool s5Uitgevallen = vorigeSensorOpLijn[4] && !sensorOpLijn[4];
-  scherpeBochtModus  = sensorOpLijn[2] && (s1Uitgevallen || s5Uitgevallen);
+  if (sensorOpLijn[2] && (s1Uitgevallen || s5Uitgevallen)) {
+    scherpeBochtModus = true;
+  } else {
+    scherpeBochtModus = false;  // Expliciet resetten als triggerconditie niet meer geldt
+  }
 
   // --- Normaal lijnvolgen via PID ---
   float positie   = berekenLijnPositie();
@@ -665,6 +672,15 @@ void behandelLijnZoeken() {
 }
 
 // ============================================================
+// isKruispuntGedetecteerd()
+// true als buitenste sensoren beide op lijn staan maar het
+// geen finish/startbox is (niet alleSensorsZwart).
+// ============================================================
+bool isKruispuntGedetecteerd() {
+  return sensorOpLijn[0] && sensorOpLijn[4] && !alleSensorsZwart();
+}
+
+// ============================================================
 // bepaalKruispuntRichtingLinkseHand()
 // Past de linkse-handregel toe: L > S > R > U (U-bocht).
 // ============================================================
@@ -727,10 +743,12 @@ void behandelKruispunt() {
         motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);
         draaiKlaar = (millis() - kruispuntStartTijd >= KRUISPUNT_DRAAI_MS);
       } else if (gekozenKruispuntRichting == 'U') {
-        // U-bocht: gebruik encoder feedback voor nauwkeurige 180°
+        // U-bocht: gebruik gemiddelde van beide encoders voor nauwkeurige 180°
         motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
-        long gedraaidTicks = encoderRechts - encoderRechtsOpKruispunt;
-        draaiKlaar = (gedraaidTicks >= TICKS_VOOR_180_GRADEN) ||
+        long deltaLinks  = encoderLinks  - encoderLinksOpKruispunt;
+        long deltaRechts = encoderRechts - encoderRechtsOpKruispunt;
+        long gemGedraaid = (deltaLinks + deltaRechts) / 2;
+        draaiKlaar = (gemGedraaid >= TICKS_VOOR_180_GRADEN) ||
                      (millis() - kruispuntStartTijd >= KRUISPUNT_DRAAI_MS * 2);
       } else {
         // Rechtdoor ('S'): kort doorrijden
@@ -778,12 +796,17 @@ void behandelDoodlopendEinde() {
     labyrinthPad[aantalLabyrinthBeslissingen++] = 'U';
   }
 
-  // 180°-draai met encoder feedback (links motor achteruit, rechts vooruit)
+  // 180°-draai met encoder feedback – gemiddelde van beide wielen voor nauwkeurigheid
+  long startLinks  = encoderLinks;
   long startRechts = encoderRechts;
   motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
   unsigned long startTijd = millis();
 
-  while ((encoderRechts - startRechts) < TICKS_VOOR_180_GRADEN) {
+  while (true) {
+    long deltaLinks  = encoderLinks  - startLinks;
+    long deltaRechts = encoderRechts - startRechts;
+    long gemGedraaid = (deltaLinks + deltaRechts) / 2;
+    if (gemGedraaid >= TICKS_VOOR_180_GRADEN) break;
     if (millis() - startTijd > 3000) break;  // Veiligheidstime-out 3 s
     delay(2);
   }
@@ -811,7 +834,7 @@ void behandelDoodlopendEinde() {
 // ============================================================
 void behandelTerugrijden() {
   // Vorig kruispunt bereikt: buitenste sensoren beide op lijn
-  if (sensorOpLijn[0] && sensorOpLijn[4] && !alleSensorsZwart()) {
+  if (isKruispuntGedetecteerd()) {
     Serial.println("Vorig kruispunt bereikt – alternatieve route bepalen.");
     encoderLinksOpKruispunt  = encoderLinks;
     encoderRechtsOpKruispunt = encoderRechts;
@@ -860,12 +883,16 @@ void behandelTerugrijden() {
 void slaOpLabyrinthPad() {
   if (aantalLabyrinthBeslissingen == 0) return;
   voorkeuringen.begin(NVS_NAMESPACE, false);
-  voorkeuringen.putBytes(NVS_SLEUTEL_PAD, labyrinthPad, aantalLabyrinthBeslissingen);
+  size_t geschrevenBytes = voorkeuringen.putBytes(NVS_SLEUTEL_PAD, labyrinthPad, aantalLabyrinthBeslissingen);
   voorkeuringen.putInt(NVS_SLEUTEL_AANTAL, aantalLabyrinthBeslissingen);
   voorkeuringen.end();
-  Serial.print("Labyrinthpad opgeslagen (");
-  Serial.print(aantalLabyrinthBeslissingen);
-  Serial.println(" beslissingen).");
+  if (geschrevenBytes != (size_t)aantalLabyrinthBeslissingen) {
+    Serial.println("FOUT: labyrinthpad kon niet volledig worden opgeslagen in NVS!");
+  } else {
+    Serial.print("Labyrinthpad opgeslagen (");
+    Serial.print(aantalLabyrinthBeslissingen);
+    Serial.println(" beslissingen).");
+  }
 }
 
 // ============================================================
