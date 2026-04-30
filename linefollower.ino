@@ -156,7 +156,7 @@ volatile long encoderRechts = 0;
 
 // ------------------------------------------------------------
 // Globale vlag – obstakelontwijking per run
-// Wordt true nadat het obstakel één keer ontweekn is; reset op nieuwe run.
+// Wordt true nadat het obstakel één keer ontweekt is; reset op nieuwe run.
 // Niet opgeslagen in NVS (per-run only).
 // ------------------------------------------------------------
 bool obstakelOntweken = false;
@@ -892,14 +892,14 @@ void behandelKruispunt() {
         } else {
           // Fase 2: draai rechts
           motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);
-          long deltaLinks2  = abs(encoderLinks  - uTurnStartEncL);
-          long deltaRechts2 = abs(encoderRechts - uTurnStartEncR);
-          long gemGedraaid2 = (deltaLinks2 + deltaRechts2) / 2;
+          long fase2DeltaLinks  = abs(encoderLinks  - uTurnStartEncL);
+          long fase2DeltaRechts = abs(encoderRechts - uTurnStartEncR);
+          long gemGedraaid2 = (fase2DeltaLinks + fase2DeltaRechts) / 2;
           if (gemGedraaid2 >= TICKS_VOOR_120_GRADEN) {
             // 120° bereikt in tweede fase → wacht op lijn
             SerialBT.print("U-turn fase 2: 120 graden rechts gedraaid (delta L=");
-            SerialBT.print(deltaLinks2); SerialBT.print(", R=");
-            SerialBT.print(deltaRechts2); SerialBT.println(") -> wacht op lijn.");
+            SerialBT.print(fase2DeltaLinks); SerialBT.print(", R=");
+            SerialBT.print(fase2DeltaRechts); SerialBT.println(") -> wacht op lijn.");
             kruispuntFase = KF_WACHT_OP_LIJN;
           } else if (millis() - kruispuntStartTijd >= max((unsigned long)KRUISPUNT_DRAAI_MS * 3, (unsigned long)1500)) {
             // Definitieve time-out → ga naar wachtfase zodat andere logica kan oppikken
