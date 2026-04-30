@@ -69,7 +69,7 @@ float Kd = 25.0;
 const int BASISSNELHEID  = 100;  // Verlaagd (was 120). Geeft de wielen meer tijd om grip te houden.
 const int MAX_SNELHEID   = 170; // Verlaagd (was 200). Voorkomt uitschieters in de bocht.
 const int MIN_SNELHEID   = 80; 
-const int DRAAI_SNELHEID = 110;
+const int DRAAI_SNELHEID = 140;
 const int OBSTAKEL_AFSTAND   = 15;  // cm – trigger obstakelontwijking
 
 // ------------------------------------------------------------
@@ -82,7 +82,7 @@ const int    MAX_LABYRINTH_BESLISSINGEN       = 50;    // Max. opgeslagen kruisp
 // ------------------------------------------------------------
 // Kruispunt-tijden (ms) – kalibreren per robot
 // ------------------------------------------------------------
-const unsigned long KRUISPUNT_CENTERING_MS = 30;   // Verlaagd van 250 naar 100!
+const unsigned long KRUISPUNT_CENTERING_MS = 80;   // Verhoogd van 30 naar 80ms voor beter centreren
 const unsigned long KRUISPUNT_DRAAI_MS     = 200;   // Verlaagd van 400 naar 250!
 
 // ------------------------------------------------------------
@@ -216,7 +216,7 @@ RijToestand toestand = WACHT_OP_START;
 
 // Tijdbeheer
 unsigned long vorigeTijd = 0;
-const unsigned long LUS_INTERVAL = 5;  // ms
+const unsigned long LUS_INTERVAL = 10;  // ms
 
 // ============================================================
 // Voorwaartse declaraties
@@ -833,21 +833,22 @@ void behandelKruispunt() {
 
     case KF_WACHT_OP_LIJN: {
       bool lijnGevonden = false;
-      
-      // STRICT CENTERING FIX:
-      // Bij het draaien ('L' of 'R') wachten we verplicht tot de MIDDELSTE sensor (index 2) de lijn ziet.
+
+      // Stop zodra een van de drie middelste sensoren (S2, S3 of S4) de lijn ziet,
+      // zodat de robot niet over de lijn heen draait bij encoder-gebaseerde aansturing.
       if (gekozenKruispuntRichting == 'S') {
         lijnGevonden = !alleSensorsWit();
       } else {
-        lijnGevonden = sensorOpLijn[2]; 
+        lijnGevonden = sensorOpLijn[1] || sensorOpLijn[2] || sensorOpLijn[3];
       }
 
       if (lijnGevonden) {
+        motorStop();  // Stop onmiddellijk om voorbijrijden door momentum te voorkomen
         integraal  = 0.0;
         vorigeFout = 0.0;
         toestand   = LIJN_VOLGEN;
       } else {
-        // Blijf draaien tot de middelste sensor de lijn vindt
+        // Blijf draaien tot een middelste sensor de lijn vindt
         if (gekozenKruispuntRichting == 'L' || gekozenKruispuntRichting == 'U') {
           motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
         } else if (gekozenKruispuntRichting == 'R') {
@@ -953,6 +954,13 @@ void behandelTerugrijden() {
   }
 
   // --- Normaal Lijnzoeken/Volgen tijdens het terugrijden ---
+
+  // Reset kruispunt-debounce zodra beide buitenste sensoren (S1, S5) de lijn niet meer zien,
+  // zodat het volgende kruispunt correct gedetecteerd kan worden.
+  if (!sensorOpLijn[0] && !sensorOpLijn[4]) {
+    kruispuntVerwerkt = false;
+  }
+
   if (alleSensorsWit()) {
     zoekTeller++;
     if (zoekTeller > MAX_ZOEK_ITERATIES) {
@@ -1060,8 +1068,8 @@ const float TICKS_PER_CM = 11.94;
 
 // --- Ontwijkings-instellingen voor 20cm Cilinder (in Ticks) ---
 // We nemen een ruime bocht om de 20cm cilinder niet te raken
-const int ONTWIJK_AFSTAND_SCHUIN = (int)(20 * TICKS_PER_CM); // 18 cm schuin weg
-const int ONTWIJK_AFSTAND_RECHT  = (int)(32 * TICKS_PER_CM); // 28 cm langs het object
+const int ONTWIJK_AFSTAND_SCHUIN = (int)(18 * TICKS_PER_CM); // 18 cm schuin weg
+const int ONTWIJK_AFSTAND_RECHT  = (int)(28 * TICKS_PER_CM); // 28 cm langs het object
 const int ONTWIJK_DRAAI_HOEK     = (int)(TICKS_VOOR_180_GRADEN * 0.33); // Ca. 60 graden draai
 
 // Time-out voor het terugzoeken naar de lijn na obstakelontwijking
@@ -1080,13 +1088,15 @@ void avoidObstacle() {
 
   auto wachtOpTicks = [&](int doelTicks) {
     while (((encoderLinks - startL) + (encoderRechts - startR)) / 2 < doelTicks) {
-      delay(5); // Korte rust voor de processor
+      // yield() geeft de CPU aan andere taken (zoals encoder-interrupts) zonder vaste wachttijd.
+      yield();
     }
   };
 
-  // 1. Stapje achteruit (optioneel, op tijd omdat het kort is)
+  // 1. Stapje achteruit (~5 cm) op basis van encoder-ticks
+  resetEncd();
   motorControl(-DRAAI_SNELHEID, -DRAAI_SNELHEID);
-  delay(200);
+  wachtOpTicks((int)(5 * TICKS_PER_CM));
 
   // 2. Draai schuin weg
   resetEncd();
