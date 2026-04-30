@@ -424,6 +424,13 @@ bool alleSensorsZwart() {
 }
 
 // ============================================================
+// middenSensorenActief()  →  true als S2, S3 of S4 op lijn staat
+// ============================================================
+bool middenSensorenActief() {
+  return sensorOpLijn[1] || sensorOpLijn[2] || sensorOpLijn[3];
+}
+
+// ============================================================
 // berekenLijnPositie()
 // Geeft gewogen gemiddelde positie terug in cm (-4..+4).
 // Geeft 999 terug als er geen sensor op de lijn staat.
@@ -750,8 +757,7 @@ void behandelLijnZoeken() {
 bool isKruispuntGedetecteerd() {
   bool buitenLinks  = sensorOpLijn[0];  // S1 – meest links
   bool buitenRechts = sensorOpLijn[4];  // S5 – meest rechts
-  bool middenActief = sensorOpLijn[1] || sensorOpLijn[2] || sensorOpLijn[3];
-  return (buitenLinks || buitenRechts) && middenActief && !alleSensorsZwart();
+  return (buitenLinks || buitenRechts) && middenSensorenActief() && !alleSensorsZwart();
 }
 
 // ============================================================
@@ -848,7 +854,7 @@ void behandelKruispunt() {
       if (gekozenKruispuntRichting == 'S') {
         lijnGevonden = !alleSensorsWit();
       } else {
-        lijnGevonden = sensorOpLijn[1] || sensorOpLijn[2] || sensorOpLijn[3];
+        lijnGevonden = middenSensorenActief();
       }
 
       if (lijnGevonden) {
@@ -887,8 +893,12 @@ void behandelDoodlopendEinde() {
     labyrinthPad[aantalLabyrinthBeslissingen++] = 'U';
   }
 
-  // 150° in encoder-ticks (5/6 van TICKS_VOOR_180_GRADEN)
+  // 150° in encoder-ticks (5/6 van 180° = 150/180 × TICKS_VOOR_180_GRADEN)
   const long TICKS_150 = (TICKS_VOOR_180_GRADEN * 5L) / 6L;
+  // Fase 1 time-out: ruim genoeg voor de 150°-boog bij DRAAI_SNELHEID
+  const unsigned long DRAAI_FASE1_TIMEOUT_MS = 2000;
+  // Fase 2 time-out: robot swingt vanaf 150°-links terug naar rechts
+  const unsigned long DRAAI_FASE2_TIMEOUT_MS = 3000;
 
   // Fase 1: Draai links tot max 150° of lijn (midden-sensoren) gevonden
   long startLinks  = encoderLinks;
@@ -899,14 +909,14 @@ void behandelDoodlopendEinde() {
 
   while (true) {
     readSensors();
-    if (sensorOpLijn[1] || sensorOpLijn[2] || sensorOpLijn[3]) {
+    if (middenSensorenActief()) {
       lijnGevonden = true;
       break;
     }
     long deltaLinks  = encoderLinks  - startLinks;
     long deltaRechts = encoderRechts - startRechts;
     long gemGedraaid = (deltaLinks + deltaRechts) / 2;
-    if (gemGedraaid >= TICKS_150 || millis() - draaiStartTijd > 2000) break;
+    if (gemGedraaid >= TICKS_150 || millis() - draaiStartTijd > DRAAI_FASE1_TIMEOUT_MS) break;
     delay(2);
   }
 
@@ -918,11 +928,11 @@ void behandelDoodlopendEinde() {
 
     while (true) {
       readSensors();
-      if (sensorOpLijn[1] || sensorOpLijn[2] || sensorOpLijn[3]) {
+      if (middenSensorenActief()) {
         lijnGevonden = true;
         break;
       }
-      if (millis() - draaiStartTijd > 3000) break;  // Veiligheidstime-out 3 s
+      if (millis() - draaiStartTijd > DRAAI_FASE2_TIMEOUT_MS) break;
       delay(2);
     }
   }
