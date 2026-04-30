@@ -69,7 +69,7 @@ float Kd = 25.0;
 const int BASISSNELHEID  = 100;  // Verlaagd (was 120). Geeft de wielen meer tijd om grip te houden.
 const int MAX_SNELHEID   = 170; // Verlaagd (was 200). Voorkomt uitschieters in de bocht.
 const int MIN_SNELHEID   = 80; 
-const int DRAAI_SNELHEID = 140;
+const int DRAAI_SNELHEID = 110;
 const int OBSTAKEL_AFSTAND   = 15;  // cm – trigger obstakelontwijking
 
 // ------------------------------------------------------------
@@ -364,8 +364,9 @@ void loop() {
   }
 
   // De eigenlijke noodstop (triggert pas onder OBSTAKEL_AFSTAND, wat nu op 20cm staat)
+  // !alleSensorsZwart() voorkomt dat de finishbalk als obstakel gezien wordt.
   if (laatsteAfstand > 0.1 && laatsteAfstand < OBSTAKEL_AFSTAND && 
-      toestand == LIJN_VOLGEN) { // Alleen triggeren TIJDENS het rijden
+      toestand == LIJN_VOLGEN && !alleSensorsZwart()) { // Alleen triggeren TIJDENS het rijden, niet op de finish
     
     SerialBT.print("OBSTAKEL BEVESTIGD op ");
     SerialBT.print(laatsteAfstand);
@@ -420,6 +421,13 @@ bool alleSensorsZwart() {
     if (!sensorOpLijn[i]) return false;
   }
   return true;
+}
+
+// ============================================================
+// middenSensorenActief()  →  true als S2, S3 of S4 op lijn staat
+// ============================================================
+bool middenSensorenActief() {
+  return sensorOpLijn[1] || sensorOpLijn[2] || sensorOpLijn[3];
 }
 
 // ============================================================
@@ -595,9 +603,9 @@ void behandelLijnVolgen() {
     finishTeller = 0; 
   }
 
-  // --- Obstakelcontrole ---
+  // --- Obstakelcontrole (sla over als we op de finish staan) ---
   float afstand = meetAfstand();
-  if (afstand < OBSTAKEL_AFSTAND) {
+  if (afstand < OBSTAKEL_AFSTAND && !alleSensorsZwart()) {
     SerialBT.print("Obstakel gedetecteerd op ");
     SerialBT.print(afstand);
     SerialBT.println(" cm – ontwijken...");
@@ -738,11 +746,18 @@ void behandelLijnZoeken() {
 
 // ============================================================
 // isKruispuntGedetecteerd()
-// true als buitenste sensoren beide op lijn staan maar het
-// geen finish/startbox is (niet alleSensorsZwart).
+// true als minstens één buitenste sensor (S1 of S5) én minstens
+// één middelste sensor (S2, S3 of S4) actief zijn, maar het geen
+// finish/startbox is (niet alleSensorsZwart).
+// Dit detecteert T-, Y- én +-kruisingen correct:
+//   T-links: S1 actief + S2/S3 actief, S5 niet actief
+//   T-rechts: S5 actief + S3/S4 actief, S1 niet actief
+//   + of Y: S1 én S5 actief
 // ============================================================
 bool isKruispuntGedetecteerd() {
-  return sensorOpLijn[0] && sensorOpLijn[4] && !alleSensorsZwart();
+  bool buitenLinks  = sensorOpLijn[0];  // S1 – meest links
+  bool buitenRechts = sensorOpLijn[4];  // S5 – meest rechts
+  return (buitenLinks || buitenRechts) && middenSensorenActief() && !alleSensorsZwart();
 }
 
 // ============================================================
@@ -839,7 +854,7 @@ void behandelKruispunt() {
       if (gekozenKruispuntRichting == 'S') {
         lijnGevonden = !alleSensorsWit();
       } else {
-        lijnGevonden = sensorOpLijn[1] || sensorOpLijn[2] || sensorOpLijn[3];
+        lijnGevonden = middenSensorenActief();
       }
 
       if (lijnGevonden) {
@@ -864,31 +879,62 @@ void behandelKruispunt() {
 
 // ============================================================
 // behandelDoodlopendEinde()
-// Voert een encoder-gestuurde 180°-draai uit (blocking, éénmalig),
-// slaat een 'U' op in het labyrinthpad en gaat daarna in de
-// TERUGRIJDEN-toestand om terug naar het vorige kruispunt te rijden.
+// Draait maximaal 150° naar links om de lijn terug te vinden.
+// Als na 150° geen lijn gevonden is, schakelt de robot over naar
+// rechts draaien tot de lijn gevonden is of de time-out verstrijkt.
+// Dit voorkomt dat de robot meer dan 150° draait in één richting
+// en daardoor per ongeluk weer naar het doodlopend einde rijdt.
 // ============================================================
 void behandelDoodlopendEinde() {
-  SerialBT.println("Doodlopend einde – 180° draai uitvoeren...");
+  SerialBT.println("Doodlopend einde – max 150° draaien, daarna andere kant...");
 
   // Sla U-bocht op in labyrinthpad (verkenstand)
   if (!herhaalmodus && aantalLabyrinthBeslissingen < MAX_LABYRINTH_BESLISSINGEN) {
     labyrinthPad[aantalLabyrinthBeslissingen++] = 'U';
   }
 
-  // 180°-draai met encoder feedback – gemiddelde van beide wielen voor nauwkeurigheid
+  // 150° in encoder-ticks (5/6 van 180° = 150/180 × TICKS_VOOR_180_GRADEN)
+  const long TICKS_150 = (TICKS_VOOR_180_GRADEN * 5L) / 6L;
+  // Fase 1 time-out: ruim genoeg voor de 150°-boog bij DRAAI_SNELHEID
+  const unsigned long DRAAI_FASE1_TIMEOUT_MS = 2000;
+  // Fase 2 time-out: robot swingt vanaf 150°-links terug naar rechts
+  const unsigned long DRAAI_FASE2_TIMEOUT_MS = 3000;
+
+  // Fase 1: Draai links tot max 150° of lijn (midden-sensoren) gevonden
   long startLinks  = encoderLinks;
   long startRechts = encoderRechts;
   motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
-  unsigned long startTijd = millis();
+  unsigned long draaiStartTijd = millis();
+  bool lijnGevonden = false;
 
   while (true) {
+    readSensors();
+    if (middenSensorenActief()) {
+      lijnGevonden = true;
+      break;
+    }
     long deltaLinks  = encoderLinks  - startLinks;
     long deltaRechts = encoderRechts - startRechts;
     long gemGedraaid = (deltaLinks + deltaRechts) / 2;
-    if (gemGedraaid >= TICKS_VOOR_180_GRADEN) break;
-    if (millis() - startTijd > 3000) break;  // Veiligheidstime-out 3 s
+    if (gemGedraaid >= TICKS_150 || millis() - draaiStartTijd > DRAAI_FASE1_TIMEOUT_MS) break;
     delay(2);
+  }
+
+  // Fase 2: lijn nog niet gevonden → schakel naar rechts draaien
+  if (!lijnGevonden) {
+    SerialBT.println("Lijn niet gevonden op 150° links – schakel naar rechts...");
+    motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);
+    draaiStartTijd = millis();
+
+    while (true) {
+      readSensors();
+      if (middenSensorenActief()) {
+        lijnGevonden = true;
+        break;
+      }
+      if (millis() - draaiStartTijd > DRAAI_FASE2_TIMEOUT_MS) break;
+      delay(2);
+    }
   }
 
   motorStop();
@@ -901,7 +947,7 @@ void behandelDoodlopendEinde() {
   lijnKwijtTimerGestart = false;
   kruispuntVerwerkt     = false;
 
-  SerialBT.println("180° draai voltooid – terugrijden naar vorig kruispunt...");
+  SerialBT.println("Doodlopend einde afgehandeld – terugrijden naar vorig kruispunt...");
   toestand = TERUGRIJDEN;
 }
 
@@ -1068,8 +1114,8 @@ const float TICKS_PER_CM = 11.94;
 
 // --- Ontwijkings-instellingen voor 20cm Cilinder (in Ticks) ---
 // We nemen een ruime bocht om de 20cm cilinder niet te raken
-const int ONTWIJK_AFSTAND_SCHUIN = (int)(18 * TICKS_PER_CM); // 18 cm schuin weg
-const int ONTWIJK_AFSTAND_RECHT  = (int)(28 * TICKS_PER_CM); // 28 cm langs het object
+const int ONTWIJK_AFSTAND_SCHUIN = (int)(20 * TICKS_PER_CM); // 20 cm schuin weg
+const int ONTWIJK_AFSTAND_RECHT  = (int)(32 * TICKS_PER_CM); // 32 cm langs het object
 const int ONTWIJK_DRAAI_HOEK     = (int)(TICKS_VOOR_180_GRADEN * 0.33); // Ca. 60 graden draai
 
 // Time-out voor het terugzoeken naar de lijn na obstakelontwijking
