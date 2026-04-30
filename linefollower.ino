@@ -739,11 +739,19 @@ void behandelLijnZoeken() {
 
 // ============================================================
 // isKruispuntGedetecteerd()
-// true als buitenste sensoren beide op lijn staan maar het
-// geen finish/startbox is (niet alleSensorsZwart).
+// true als minstens één buitenste sensor (S1 of S5) én minstens
+// één middelste sensor (S2, S3 of S4) actief zijn, maar het geen
+// finish/startbox is (niet alleSensorsZwart).
+// Dit detecteert T-, Y- én +-kruisingen correct:
+//   T-links: S1 actief + S2/S3 actief, S5 niet actief
+//   T-rechts: S5 actief + S3/S4 actief, S1 niet actief
+//   + of Y: S1 én S5 actief
 // ============================================================
 bool isKruispuntGedetecteerd() {
-  return sensorOpLijn[0] && sensorOpLijn[4] && !alleSensorsZwart();
+  bool buitenLinks  = sensorOpLijn[0];  // S1 – meest links
+  bool buitenRechts = sensorOpLijn[4];  // S5 – meest rechts
+  bool middenActief = sensorOpLijn[1] || sensorOpLijn[2] || sensorOpLijn[3];
+  return (buitenLinks || buitenRechts) && middenActief && !alleSensorsZwart();
 }
 
 // ============================================================
@@ -865,31 +873,58 @@ void behandelKruispunt() {
 
 // ============================================================
 // behandelDoodlopendEinde()
-// Voert een encoder-gestuurde 180°-draai uit (blocking, éénmalig),
-// slaat een 'U' op in het labyrinthpad en gaat daarna in de
-// TERUGRIJDEN-toestand om terug naar het vorige kruispunt te rijden.
+// Draait maximaal 150° naar links om de lijn terug te vinden.
+// Als na 150° geen lijn gevonden is, schakelt de robot over naar
+// rechts draaien tot de lijn gevonden is of de time-out verstrijkt.
+// Dit voorkomt dat de robot meer dan 150° draait in één richting
+// en daardoor per ongeluk weer naar het doodlopend einde rijdt.
 // ============================================================
 void behandelDoodlopendEinde() {
-  SerialBT.println("Doodlopend einde – 180° draai uitvoeren...");
+  SerialBT.println("Doodlopend einde – max 150° draaien, daarna andere kant...");
 
   // Sla U-bocht op in labyrinthpad (verkenstand)
   if (!herhaalmodus && aantalLabyrinthBeslissingen < MAX_LABYRINTH_BESLISSINGEN) {
     labyrinthPad[aantalLabyrinthBeslissingen++] = 'U';
   }
 
-  // 180°-draai met encoder feedback – gemiddelde van beide wielen voor nauwkeurigheid
+  // 150° in encoder-ticks (5/6 van TICKS_VOOR_180_GRADEN)
+  const long TICKS_150 = (TICKS_VOOR_180_GRADEN * 5L) / 6L;
+
+  // Fase 1: Draai links tot max 150° of lijn (midden-sensoren) gevonden
   long startLinks  = encoderLinks;
   long startRechts = encoderRechts;
   motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
-  unsigned long startTijd = millis();
+  unsigned long draaiStartTijd = millis();
+  bool lijnGevonden = false;
 
   while (true) {
+    readSensors();
+    if (sensorOpLijn[1] || sensorOpLijn[2] || sensorOpLijn[3]) {
+      lijnGevonden = true;
+      break;
+    }
     long deltaLinks  = encoderLinks  - startLinks;
     long deltaRechts = encoderRechts - startRechts;
     long gemGedraaid = (deltaLinks + deltaRechts) / 2;
-    if (gemGedraaid >= TICKS_VOOR_180_GRADEN) break;
-    if (millis() - startTijd > 3000) break;  // Veiligheidstime-out 3 s
+    if (gemGedraaid >= TICKS_150 || millis() - draaiStartTijd > 2000) break;
     delay(2);
+  }
+
+  // Fase 2: lijn nog niet gevonden → schakel naar rechts draaien
+  if (!lijnGevonden) {
+    SerialBT.println("Lijn niet gevonden op 150° links – schakel naar rechts...");
+    motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);
+    draaiStartTijd = millis();
+
+    while (true) {
+      readSensors();
+      if (sensorOpLijn[1] || sensorOpLijn[2] || sensorOpLijn[3]) {
+        lijnGevonden = true;
+        break;
+      }
+      if (millis() - draaiStartTijd > 3000) break;  // Veiligheidstime-out 3 s
+      delay(2);
+    }
   }
 
   motorStop();
@@ -902,7 +937,7 @@ void behandelDoodlopendEinde() {
   lijnKwijtTimerGestart = false;
   kruispuntVerwerkt     = false;
 
-  SerialBT.println("180° draai voltooid – terugrijden naar vorig kruispunt...");
+  SerialBT.println("Doodlopend einde afgehandeld – terugrijden naar vorig kruispunt...");
   toestand = TERUGRIJDEN;
 }
 
