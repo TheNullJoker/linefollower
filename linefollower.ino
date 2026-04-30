@@ -67,7 +67,7 @@ float Kd = 25.0;
 // Rijsnelheid-instellingen (0-255)
 // ------------------------------------------------------------
 const int BASISSNELHEID  = 100;  // Verlaagd (was 120). Geeft de wielen meer tijd om grip te houden.
-const int MAX_SNELHEID   = 170; // Verlaagd (was 200). Voorkomt uitschieters in de bocht.
+const int MAX_SNELHEID   = 160; // Verlaagd (was 200). Voorkomt uitschieters in de bocht.
 const int MIN_SNELHEID   = 80; 
 const int DRAAI_SNELHEID = 110;
 const int OBSTAKEL_AFSTAND   = 15;  // cm – trigger obstakelontwijking
@@ -1184,12 +1184,12 @@ const float TICKS_PER_CM = 11.94;
 
 // --- Ontwijkings-instellingen voor 20cm Cilinder (in Ticks) ---
 // We nemen een ruime bocht om de 20cm cilinder niet te raken
-const int ONTWIJK_AFSTAND_SCHUIN = (int)(22 * TICKS_PER_CM); // 20 cm schuin weg
-const int ONTWIJK_AFSTAND_RECHT  = (int)(45 * TICKS_PER_CM); // 32 cm langs het object
+const int ONTWIJK_AFSTAND_SCHUIN = (int)(23 * TICKS_PER_CM); // 20 cm schuin weg
+const int ONTWIJK_AFSTAND_RECHT  = (int)(50 * TICKS_PER_CM); // 32 cm langs het object
 const int ONTWIJK_DRAAI_HOEK     = (int)(TICKS_VOOR_180_GRADEN * 0.33); // Ca. 60 graden draai
 
 // Time-out voor het terugzoeken naar de lijn na obstakelontwijking
-const int LIJN_ZOEK_TIMEOUT_MS     = 3500;
+const int LIJN_ZOEK_TIMEOUT_MS     = 9000;
 
 void avoidObstacle() {
   SerialBT.println("Obstakelontwijking: Start op basis van ticks");
@@ -1244,7 +1244,7 @@ void avoidObstacle() {
   unsigned long startZoek = millis();
   while (alleSensorsWit()) {
     readSensors();
-    if (millis() - startZoek > 5000) break; // Veiligheidstime-out
+    if (millis() - startZoek > LIJN_ZOEK_TIMEOUT_MS) break; // Veiligheidstime-out
   }
 
   // 8. Korte correctie om weer recht op de lijn te komen
@@ -1257,7 +1257,7 @@ void avoidObstacle() {
   startZoek = millis();
   while (alleSensorsWit()) {
     readSensors();
-    if (millis() - startZoek > 5000) break; // Veiligheidstime-out
+    if (millis() - startZoek > LIJN_ZOEK_TIMEOUT_MS) break; // Veiligheidstime-out
     yield();
   }
 
