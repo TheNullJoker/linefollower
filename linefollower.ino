@@ -75,7 +75,15 @@ const int OBSTAKEL_AFSTAND   = 15;  // cm – trigger obstakelontwijking
 // ------------------------------------------------------------
 // Doodlopend einde / labyrinth-constanten
 // ------------------------------------------------------------
-const unsigned long LIJN_KWIJT_DOODLOPEND_MS = 2500;  // ms lijn kwijt → doodlopend einde
+const unsigned long LIJN_KWIJT_DOODLOPEND_MS = 5000;  // ms lijn kwijt → doodlopend einde (verhoogd van 2500 naar 5000)
+
+// Sweep-faseduurtijden voor LIJN_ZOEKEN (ms, tunable)
+const unsigned long ZOEK_FASE_A_MS  = 200;   // Fase A: rechtdoor rijden
+const unsigned long ZOEK_FASE_B_MS  = 400;   // Fase B: draaien naar laatste bekende richting
+const unsigned long ZOEK_FASE_C_MS  = 750;   // Fase C: draaien naar tegenovergestelde richting
+const unsigned long ZOEK_FASE_D_MS  = 1050;  // Fase D: draaien terug naar oorspronkelijke richting
+// Totale sweep-cyclus: 2400 ms (< LIJN_KWIJT_DOODLOPEND_MS)
+
 const long   TICKS_VOOR_180_GRADEN           = 377;   // Encoderticks voor 180° (kalibreren!)
 const long   TICKS_VOOR_120_GRADEN           = (long)((float)TICKS_VOOR_180_GRADEN * 120.0 / 180.0 + 0.5); // ~251 ticks voor 120°
 const int    MAX_LABYRINTH_BESLISSINGEN       = 50;    // Max. opgeslagen kruispuntbeslissingen
@@ -184,6 +192,8 @@ unsigned long knopIngedruktSinds      = 0;   // Voor lang-indruk detectie
 // ------------------------------------------------------------
 unsigned long lijnKwijtTijd          = 0;
 bool          lijnKwijtTimerGestart  = false;
+bool          sweepCyclusVoltooid    = false;  // true als minstens één volledige sweep doorlopen is
+int           vorigZoekFase          = -1;     // Voor detectie faseovergang (BT-log throttling)
 
 // ------------------------------------------------------------
 // Globale variabelen – kruispunt-verwerking
@@ -634,22 +644,17 @@ void behandelLijnVolgen() {
     finishTeller = 0; 
   }
 
-  // --- Obstakelcontrole (sla over als we op de finish staan) ---
-  float afstand = meetAfstand();
-  if (afstand < OBSTAKEL_AFSTAND && !alleSensorsZwart()) {
-    SerialBT.print("Obstakel gedetecteerd op ");
-    SerialBT.print(afstand);
-    SerialBT.println(" cm – ontwijken...");
-    toestand = OBSTAKEL_ONTWIJKEN;
-    return;
-  }
+  // --- Obstakelcontrole: gebruik gecachete afstand uit loop() – geen extra blokkerende meting ---
+  // (de obstakel-override in loop() handelt de overgang naar OBSTAKEL_ONTWIJKEN al af)
 
   // --- Lijn kwijt → overschakelen naar zoeken ---
   if (alleSensorsWit()) {
     lijnKwijtTijd         = millis();
     lijnKwijtTimerGestart = true;
-    zoekTeller = 0;
-    toestand   = LIJN_ZOEKEN;
+    zoekTeller            = 0;
+    sweepCyclusVoltooid   = false;
+    vorigZoekFase         = -1;
+    toestand              = LIJN_ZOEKEN;
     return;
   }
 
@@ -730,50 +735,90 @@ void behandelLijnVolgen() {
 
 // ============================================================
 // behandelLijnZoeken()
-// Draait naar de laatste bekende zijde om de lijn terug te
-// vinden. Als de lijn langer dan LIJN_KWIJT_DOODLOPEND_MS
-// kwijt is, wordt een doodlopend einde aangenomen.
+// Voert een deterministische 4-fase sweep uit om de lijn terug
+// te vinden voordat een doodlopend einde wordt aangenomen.
+//
+// Fase A (0–ZOEK_FASE_A_MS):            Rij rechtdoor ('kusten')
+// Fase B (A–A+B):                        Draai naar laatste bekende richting
+// Fase C (A+B–A+B+C):                    Draai naar tegenovergestelde richting
+// Fase D (A+B+C–A+B+C+D):               Draai terug naar oorspronkelijke richting
+// Na fase D: sweep voltooid; blijf draaien en wacht op doodlopend-timer.
+//
+// Doodlopend einde alleen na volledige sweep ÉN na LIJN_KWIJT_DOODLOPEND_MS.
 // ============================================================
 void behandelLijnZoeken() {
-  // Lijn teruggevonden
+  // Lijn teruggevonden – direct hervatten
   if (!alleSensorsWit()) {
     integraal             = 0.0;
+    vorigeFout            = 0.0;
     zoekTeller            = 0;
+    sweepCyclusVoltooid   = false;
+    vorigZoekFase         = -1;
     lijnKwijtTimerGestart = false;
-    toestand              = LIJN_VOLGEN;
+    SerialBT.println("LIJN_ZOEKEN: lijn teruggevonden – hervat LIJN_VOLGEN.");
+    toestand = LIJN_VOLGEN;
     return;
   }
 
-  // Lijn kwijt > 1 seconde → doodlopend einde
-  if (lijnKwijtTimerGestart && (millis() - lijnKwijtTijd > LIJN_KWIJT_DOODLOPEND_MS)) {
-    SerialBT.println("Lijn > 1 s kwijt – doodlopend einde gedetecteerd!");
-    lijnKwijtTimerGestart = false;
-    motorStop();
-    delay(100);
-    toestand = DOODLOPEND_EINDE;
-    return;
-  }
+  unsigned long verstreken = millis() - lijnKwijtTijd;
 
-  // Fase 1: Eerste ~200 ms rechtdoor rijden (hindernissen afsnijden)
-  if (zoekTeller < 20) {
-    motorControl(BASISSNELHEID, BASISSNELHEID);
-  }
-  // Fase 2: Draaien naar laatste bekende richting
+  // Bepaal huidige sweep-fase op basis van verstreken tijd
+  const unsigned long EINDE_A = ZOEK_FASE_A_MS;
+  const unsigned long EINDE_B = EINDE_A + ZOEK_FASE_B_MS;
+  const unsigned long EINDE_C = EINDE_B + ZOEK_FASE_C_MS;
+  const unsigned long EINDE_D = EINDE_C + ZOEK_FASE_D_MS;
+
+  int zoekFase;
+  if      (verstreken < EINDE_A) zoekFase = 0;  // A: rechtdoor
+  else if (verstreken < EINDE_B) zoekFase = 1;  // B: draaien naar bekende richting
+  else if (verstreken < EINDE_C) zoekFase = 2;  // C: draaien tegenovergesteld
+  else if (verstreken < EINDE_D) zoekFase = 3;  // D: draaien terug
   else {
-    if (laatsteBekendeRichting <= 0) {
-      motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);  // Draai links
-    } else {
-      motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);  // Draai rechts
+    zoekFase = 4;                                // Sweep voltooid
+    sweepCyclusVoltooid = true;
+  }
+
+  // Throttled BT-log: alleen printen bij faseovergang
+  if (zoekFase != vorigZoekFase) {
+    vorigZoekFase = zoekFase;
+    switch (zoekFase) {
+      case 0: SerialBT.println("LIJN_ZOEKEN fase A: rechtdoor rijden."); break;
+      case 1: SerialBT.println("LIJN_ZOEKEN fase B: draaien naar laatste bekende richting."); break;
+      case 2: SerialBT.println("LIJN_ZOEKEN fase C: draaien naar tegenovergestelde richting."); break;
+      case 3: SerialBT.println("LIJN_ZOEKEN fase D: draaien terug naar oorspronkelijke richting."); break;
+      case 4: SerialBT.println("LIJN_ZOEKEN sweep voltooid – wacht op doodlopend-einde timer."); break;
     }
   }
 
-  zoekTeller++;
+  // Motoraansturing per fase
+  switch (zoekFase) {
+    case 0:
+      motorControl(BASISSNELHEID, BASISSNELHEID);
+      break;
+    case 1:
+    case 3:
+    case 4:  // Na sweep: blijf draaien in oorspronkelijke richting
+      if (laatsteBekendeRichting <= 0) motorControl(-DRAAI_SNELHEID,  DRAAI_SNELHEID);
+      else                             motorControl( DRAAI_SNELHEID, -DRAAI_SNELHEID);
+      break;
+    case 2:
+      if (laatsteBekendeRichting <= 0) motorControl( DRAAI_SNELHEID, -DRAAI_SNELHEID);
+      else                             motorControl(-DRAAI_SNELHEID,  DRAAI_SNELHEID);
+      break;
+  }
 
-  // Maximale zoektijd overschreden → stop (veiligheid)
-  if (zoekTeller > MAX_ZOEK_ITERATIES) {
-    SerialBT.println("Lijn niet gevonden na zoeken – robot stopt.");
+  // Doodlopend einde: alleen na volledige sweep ÉN na LIJN_KWIJT_DOODLOPEND_MS
+  if (sweepCyclusVoltooid && lijnKwijtTimerGestart &&
+      (millis() - lijnKwijtTijd > LIJN_KWIJT_DOODLOPEND_MS)) {
+    SerialBT.print("Lijn > ");
+    SerialBT.print(LIJN_KWIJT_DOODLOPEND_MS);
+    SerialBT.println(" ms kwijt na volledige sweep – doodlopend einde gedetecteerd!");
+    lijnKwijtTimerGestart = false;
+    sweepCyclusVoltooid   = false;
+    vorigZoekFase         = -1;
     motorStop();
-    toestand = FINISH_BEREIKT;
+    delay(100);
+    toestand = DOODLOPEND_EINDE;
   }
 }
 
