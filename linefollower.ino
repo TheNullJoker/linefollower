@@ -1,4 +1,11 @@
 #include <Preferences.h>
+#include <BluetoothSerial.h>
+
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+#error Bluetooth is niet ingeschakeld! Update je board instellingen.
+#endif
+
+BluetoothSerial SerialBT;
 
 // ============================================================
 // Pin-definities – IR-sensoren (LOW = lijn/zwart)
@@ -12,10 +19,6 @@
 // ------------------------------------------------------------
 // Pin-definities – Knop (start / later mode)
 // ------------------------------------------------------------
-// DOIT ESP32 DevKit v1: D5 = GPIO5
-// Sluit knop aan tussen GPIO5 en GND.
-// We gebruiken INPUT_PULLUP => ingedrukt = LOW.
-// Let op: GPIO5 is een strapping pin; vermijd reboot/flash terwijl je de knop ingedrukt houdt.
 #define BTN_PIN 5
 
 // ------------------------------------------------------------
@@ -36,15 +39,12 @@
 // ------------------------------------------------------------
 // Pin-definities – Ultrasone sensor HC-SR04
 // ------------------------------------------------------------
-#define TRIG_PIN 12
-#define ECHO_PIN 13
+#define TRIG_PIN 16
+#define ECHO_PIN 17
 
 // ------------------------------------------------------------
 // Pin-definities – Encoders
 // ------------------------------------------------------------
-// ENC_L_A is gewijzigd naar pin 23 om het conflict met
-// PWMB_PIN (18) te vermijden. Pas aan als je hardware
-// een andere vrije pin gebruikt.
 #define ENC_L_A 23
 #define ENC_L_B 22
 #define ENC_R_A 21
@@ -53,46 +53,42 @@
 // ------------------------------------------------------------
 // PWM-instellingen (ESP32 LEDC)
 // ------------------------------------------------------------
-// Let op: Nieuwere Arduino-ESP32 cores gebruiken een pin-gebaseerde LEDC API:
-//   ledcAttach(pin, freq, resolutionBits)
-//   ledcWrite(pin, duty)
-// Daarom gebruiken we hier geen kanaal-IDs meer.
 #define PWM_FREQ       1000   // Hz
 #define PWM_RESOLUTION    8   // bits (0-255)
 
 // ------------------------------------------------------------
 // PID-parameters – pas Kp, Ki en Kd aan voor je robot
 // ------------------------------------------------------------
-float Kp = 15.0;
+float Kp = 12.0;
 float Ki =  0.0;
-float Kd = 15.0;
+float Kd = 25.0;
 
 // ------------------------------------------------------------
 // Rijsnelheid-instellingen (0-255)
 // ------------------------------------------------------------
-const int BASISSNELHEID      = 120; // Normale rijsnelheid
-const int MAX_SNELHEID       = 200; // Maximale motorsnelheid
-const int MIN_SNELHEID       = 45;  // Minimale PWM om motor-stall te voorkomen (afstemmen!)
-const int DRAAI_SNELHEID     = 130;  // Snelheid bij zoeken na lijnverlies
-const int OBSTAKEL_AFSTAND   = 20;  // cm – trigger obstakelontwijking
+const int BASISSNELHEID  = 100;  // Verlaagd (was 120). Geeft de wielen meer tijd om grip te houden.
+const int MAX_SNELHEID   = 170; // Verlaagd (was 200). Voorkomt uitschieters in de bocht.
+const int MIN_SNELHEID   = 80; 
+const int DRAAI_SNELHEID = 110;
+const int OBSTAKEL_AFSTAND   = 15;  // cm – trigger obstakelontwijking
 
 // ------------------------------------------------------------
 // Doodlopend einde / labyrinth-constanten
 // ------------------------------------------------------------
 const unsigned long LIJN_KWIJT_DOODLOPEND_MS = 2500;  // ms lijn kwijt → doodlopend einde
-const long   TICKS_VOOR_180_GRADEN           = 120;   // Encoderticks voor 180° (kalibreren!)
+const long   TICKS_VOOR_180_GRADEN           = 377;   // Encoderticks voor 180° (kalibreren!)
 const int    MAX_LABYRINTH_BESLISSINGEN       = 50;    // Max. opgeslagen kruispuntbeslissingen
 
 // ------------------------------------------------------------
 // Kruispunt-tijden (ms) – kalibreren per robot
 // ------------------------------------------------------------
-const unsigned long KRUISPUNT_CENTERING_MS = 250;   // Vooruit rijden om op kruispunt te centreren
-const unsigned long KRUISPUNT_DRAAI_MS     = 400;   // Tijd voor 90°-draai bij kruispunt
+const unsigned long KRUISPUNT_CENTERING_MS = 30;   // Verlaagd van 250 naar 100!
+const unsigned long KRUISPUNT_DRAAI_MS     = 200;   // Verlaagd van 400 naar 250!
 
 // ------------------------------------------------------------
 // Sensorposities in cm (offset t.o.v. midden)
 // ------------------------------------------------------------
-const float SENSOR_POS[5] = { -5.0, -1.9, 0.0, 1.9, 5.0 };
+const float SENSOR_POS[5] = { -6.5, -2.0, 0.0, 2.0, 6.5 };
 
 // ------------------------------------------------------------
 // NVS-sleutels voor labyrinth-opslag (Preferences.h)
@@ -115,6 +111,13 @@ float fout         = 0.0;
 float vorigeFout   = 0.0;
 float integraal    = 0.0;
 float pidUitvoer   = 0.0;
+
+// ------------------------------------------------------------
+// Globale variabelen – Ultrasoon Rate Limiting
+// ------------------------------------------------------------
+unsigned long laatstePingTijd = 0;
+const unsigned long PING_INTERVAL = 60; // HC-SR04 heeft ~60ms nodig tussen pings
+float laatsteAfstand = 999.0;
 
 // ------------------------------------------------------------
 // Globale variabelen – zigzag bypass
@@ -213,7 +216,7 @@ RijToestand toestand = WACHT_OP_START;
 
 // Tijdbeheer
 unsigned long vorigeTijd = 0;
-const unsigned long LUS_INTERVAL = 10;  // ms
+const unsigned long LUS_INTERVAL = 5;  // ms
 
 // ============================================================
 // Voorwaartse declaraties
@@ -242,6 +245,8 @@ void IRAM_ATTR isrEncoderRechtsA() {
 // ============================================================
 void setup() {
   Serial.begin(115200);
+  SerialBT.begin("LineFollower_Onno"); 
+  Serial.println("Bluetooth gestart! Koppel met je apparaat.");
 
   // IR-sensoren
   pinMode(S1_PIN, INPUT);
@@ -285,14 +290,14 @@ void setup() {
   // Laad opgeslagen labyrinthpad uit NVS
   herhaalmodus = laadLabyrinthPad();
   if (herhaalmodus) {
-    Serial.println("Opgeslagen labyrinthpad gevonden – herhaalstand actief.");
-    Serial.print("Opgeslagen beslissingen: ");
-    Serial.println(aantalLabyrinthBeslissingen);
+    SerialBT.println("Opgeslagen labyrinthpad gevonden – herhaalstand actief.");
+    SerialBT.print("Opgeslagen beslissingen: ");
+    SerialBT.println(aantalLabyrinthBeslissingen);
   } else {
-    Serial.println("Geen opgeslagen pad – verkenstand actief (linkse-handregel).");
+    SerialBT.println("Geen opgeslagen pad – verkenstand actief (linkse-handregel).");
   }
 
-  Serial.println("Robot gereed. Druk kort om te starten, houd 3 s in om pad te wissen.");
+  SerialBT.println("Robot gereed. Druk kort om te starten, houd 3 s in om pad te wissen.");
 }
 
 // ============================================================
@@ -305,38 +310,80 @@ void loop() {
 
   readSensors();
 
-  switch (toestand) {
-    case WACHT_OP_START:
-      behandelWachtOpStart();
-      break;
+  // --- 2. UNIVERSELE KNOP LOGICA (Toggle Pauze/Run & Reset) ---
+  static unsigned long knopIngedruktTijd = 0;
+  static bool knopWasIngedrukt = false;
+  static bool knopActieUitgevoerd = false;
 
-    case LIJN_VOLGEN:
-      behandelLijnVolgen();
-      break;
+  bool knopIsIngedrukt = (digitalRead(BTN_PIN) == LOW);
 
-    case LIJN_ZOEKEN:
-      behandelLijnZoeken();
-      break;
+  if (knopIsIngedrukt && !knopWasIngedrukt) {
+    knopIngedruktTijd = millis();       // Start timer
+    knopActieUitgevoerd = false;        // Reset status
+  }
 
-    case KRUISPUNT:
-      behandelKruispunt();
-      break;
-
-    case DOODLOPEND_EINDE:
-      behandelDoodlopendEinde();
-      break;
-
-    case TERUGRIJDEN:
-      behandelTerugrijden();
-      break;
-
-    case OBSTAKEL_ONTWIJKEN:
-      avoidObstacle();
-      break;
-
-    case FINISH_BEREIKT:
+  // Check voor lang indrukken (flash reset)
+  if (knopIsIngedrukt && !knopActieUitgevoerd) {
+    if (millis() - knopIngedruktTijd > 3000) {
+      wisLabyrinthPad();
+      SerialBT.println("GEHEUGEN GEWIST! Laat knop los.");
+      knopActieUitgevoerd = true;
+      toestand = WACHT_OP_START;
       motorStop();
-      break;
+    }
+  }
+
+  // Check voor korte druk (loslaten vóór 3 sec)
+  if (!knopIsIngedrukt && knopWasIngedrukt) {
+    if (!knopActieUitgevoerd && (millis() - knopIngedruktTijd > 50)) { // 50ms debounce
+      if (toestand == WACHT_OP_START) {
+        SerialBT.println("Robot start/hervat!");
+        toestand = LIJN_VOLGEN;
+      } else {
+        SerialBT.println("Robot PAUZE!");
+        motorStop();
+        toestand = WACHT_OP_START;
+      }
+    }
+  }
+  knopWasIngedrukt = knopIsIngedrukt;
+
+  // 3. Obstakel Priority Override (Buiten de toestand-machine!)
+  if (nu - laatstePingTijd >= PING_INTERVAL) {
+    laatsteAfstand = meetAfstand();
+    laatstePingTijd = nu;
+
+    // NIEUW: Print de afstand als deze onder de 40 cm duikt (max 2 keer per seconde tegen BT spam)
+    static unsigned long laatsteBTPrint = 0;
+    if (laatsteAfstand < 40.0 && (nu - laatsteBTPrint > 500)) {
+      SerialBT.print("Object gespot op: ");
+      SerialBT.print(laatsteAfstand);
+      SerialBT.println(" cm");
+      laatsteBTPrint = nu;
+    }
+  }
+
+  // De eigenlijke noodstop (triggert pas onder OBSTAKEL_AFSTAND, wat nu op 20cm staat)
+  if (laatsteAfstand > 0.1 && laatsteAfstand < OBSTAKEL_AFSTAND && 
+      toestand == LIJN_VOLGEN) { // Alleen triggeren TIJDENS het rijden
+    
+    SerialBT.print("OBSTAKEL BEVESTIGD op ");
+    SerialBT.print(laatsteAfstand);
+    SerialBT.println(" cm. Start ontwijking...");
+    
+    toestand = OBSTAKEL_ONTWIJKEN;
+  }
+
+  // 4. Toestandsmachine uitvoeren
+  switch (toestand) {
+    case WACHT_OP_START:      motorStop(); break;
+    case LIJN_VOLGEN:         behandelLijnVolgen(); break;
+    case LIJN_ZOEKEN:         behandelLijnZoeken(); break;
+    case KRUISPUNT:           behandelKruispunt(); break;
+    case DOODLOPEND_EINDE:    behandelDoodlopendEinde(); break;
+    case TERUGRIJDEN:         behandelTerugrijden(); break;
+    case OBSTAKEL_ONTWIJKEN:  avoidObstacle(); break;
+    case FINISH_BEREIKT:      motorStop(); break;
   }
 }
 
@@ -522,30 +569,7 @@ bool knopLangIngedrukt(unsigned long drempelTijd) {
 // Robot staat stil en wacht op knopdruk om te starten.
 // Lang indrukken (≥ 3 s) wist het opgeslagen labyrinthpad.
 // ============================================================
-void behandelWachtOpStart() {
-  motorStop();
 
-  // Lang indrukken: wis opgeslagen pad en start in verkenstand
-  if (knopLangIngedrukt(3000)) {
-    wisLabyrinthPad();
-    Serial.println("Pad gewist – verkenstand gestart!");
-    integraal  = 0.0;
-    vorigeFout = 0.0;
-    zoekTeller = 0;
-    // Consumeer de knopstaat zodat een volgende kortere druk geen spurious event geeft
-    vorigeKnopStaatIngedrukt = knopStaatIngedrukt;
-    toestand   = LIJN_VOLGEN;
-    return;
-  }
-
-  if (knopPressedEvent()) {
-    Serial.println("Knop ingedrukt – robot start!");
-    integraal  = 0.0;
-    vorigeFout = 0.0;
-    zoekTeller = 0;
-    toestand   = LIJN_VOLGEN;
-  }
-}
 
 // ============================================================
 // behandelLijnVolgen()
@@ -553,29 +577,30 @@ void behandelWachtOpStart() {
 // obstakel- en finishcontrole.
 // ============================================================
 void behandelLijnVolgen() {
-  // Knop = pauze/stop
-  if (knopPressedEvent()) {
-    Serial.println("Knop ingedrukt – robot pauze/stop (terug naar WACHT_OP_START)");
-    motorStop();
-    toestand = WACHT_OP_START;
-    return;
-  }
-
-  // --- Finish: alle sensoren zwart ---
+  // --- Finish: alle sensoren zwart met ingebouwde vertraging ---
+  // static variabele behoudt zijn waarde tussen loop-cycli
+  static int finishTeller = 0; 
+  
   if (alleSensorsZwart()) {
-    slaOpLabyrinthPad();  // Sla het gevolgde pad op voor de volgende run
-    Serial.println("FINISH gedetecteerd – pad opgeslagen, robot stopt!");
-    motorStop();
-    toestand = FINISH_BEREIKT;
-    return;
+    finishTeller++;
+    if (finishTeller >= 15) { // 15 x 10ms lus = 150ms continu zwart
+      slaOpLabyrinthPad();
+      SerialBT.println("FINISH gedetecteerd – pad opgeslagen, robot stopt!");
+      motorStop();
+      toestand = FINISH_BEREIKT;
+      return;
+    }
+  } else {
+    // Reset de teller direct als ook maar één sensor weer wit ziet
+    finishTeller = 0; 
   }
 
   // --- Obstakelcontrole ---
   float afstand = meetAfstand();
   if (afstand < OBSTAKEL_AFSTAND) {
-    Serial.print("Obstakel gedetecteerd op ");
-    Serial.print(afstand);
-    Serial.println(" cm – ontwijken...");
+    SerialBT.print("Obstakel gedetecteerd op ");
+    SerialBT.print(afstand);
+    SerialBT.println(" cm – ontwijken...");
     toestand = OBSTAKEL_ONTWIJKEN;
     return;
   }
@@ -592,9 +617,14 @@ void behandelLijnVolgen() {
   // --- Kruispunt-detectie: buitenste sensoren beide op lijn ---
   // (Y-kruispunt, T-kruising of volledige kruising)
   if (isKruispuntGedetecteerd() && !kruispuntVerwerkt) {
-    Serial.println("Kruispunt gedetecteerd!");
+    SerialBT.println("Kruispunt gedetecteerd!");
     encoderLinksOpKruispunt  = encoderLinks;
     encoderRechtsOpKruispunt = encoderRechts;
+
+    kruispuntLinksOptie     = false;
+    kruispuntRechtdoorOptie = false;
+    kruispuntRechtsOptie    = false;
+
     kruispuntFase      = KF_VOORUIT_CENTEREN;
     kruispuntStartTijd = millis();
     kruispuntVerwerkt  = true;
@@ -618,9 +648,9 @@ void behandelLijnVolgen() {
     zigzagTeller++;
     zigzagStabielTeller = 0;
     if (zigzagTeller >= ZIGZAG_DREMPEL) {
-      zigzagModusActief = true;
+      zigzagModusActief = true; //DEZE TERUG OP TRUE ZETTEN!!!!
       zigzagTeller      = 0;
-      Serial.println("Zigzag gedetecteerd – rechtdoor rijden.");
+      SerialBT.println("Zigzag gedetecteerd – rechtdoor rijden.");
     }
   } else if (zigzagModusActief && sensorOpLijn[2] && !s1Uitgevallen && !s5Uitgevallen) {
     // Lijn stabiel onder S3, tel stabiele cycli
@@ -629,7 +659,7 @@ void behandelLijnVolgen() {
       zigzagModusActief   = false;
       zigzagTeller        = 0;
       zigzagStabielTeller = 0;
-      Serial.println("Zigzag voorbij – PID hervat.");
+      SerialBT.println("Zigzag voorbij – PID hervat.");
     }
   } else if (!zigzagModusActief) {
     // Buiten zigzag-modus: wis teller bij elke stabiele cyclus
@@ -675,7 +705,7 @@ void behandelLijnZoeken() {
 
   // Lijn kwijt > 1 seconde → doodlopend einde
   if (lijnKwijtTimerGestart && (millis() - lijnKwijtTijd > LIJN_KWIJT_DOODLOPEND_MS)) {
-    Serial.println("Lijn > 1 s kwijt – doodlopend einde gedetecteerd!");
+    SerialBT.println("Lijn > 1 s kwijt – doodlopend einde gedetecteerd!");
     lijnKwijtTimerGestart = false;
     motorStop();
     delay(100);
@@ -700,7 +730,7 @@ void behandelLijnZoeken() {
 
   // Maximale zoektijd overschreden → stop (veiligheid)
   if (zoekTeller > MAX_ZOEK_ITERATIES) {
-    Serial.println("Lijn niet gevonden na zoeken – robot stopt.");
+    SerialBT.println("Lijn niet gevonden na zoeken – robot stopt.");
     motorStop();
     toestand = FINISH_BEREIKT;
   }
@@ -740,28 +770,28 @@ void behandelKruispunt() {
 
     case KF_VOORUIT_CENTEREN: {
       motorControl(BASISSNELHEID, BASISSNELHEID);
-      if (millis() - kruispuntStartTijd >= KRUISPUNT_CENTERING_MS) {
-        // Lees sensoren voor beschikbare richtingen
-        readSensors();
-        kruispuntLinksOptie     = sensorOpLijn[0] || sensorOpLijn[1];
-        kruispuntRechtdoorOptie = sensorOpLijn[2];
-        kruispuntRechtsOptie    = sensorOpLijn[3] || sensorOpLijn[4];
 
-        // Kies richting: geforceerd (terugrijden), herhaalstand of verkenstand (linkse-handregel)
+      // SCAN-FIX: Verzamel vertakkingen *tijdens* het centreren! 
+      // Zodra een sensor in deze 100ms iets ziet, wordt de optie 'true' gelockt.
+      if (sensorOpLijn[0] || sensorOpLijn[1]) kruispuntLinksOptie = true;
+      if (sensorOpLijn[2])                    kruispuntRechtdoorOptie = true;
+      if (sensorOpLijn[3] || sensorOpLijn[4]) kruispuntRechtsOptie = true;
+
+      if (millis() - kruispuntStartTijd >= KRUISPUNT_CENTERING_MS) {
+        
         if (geforceerdeRichting) {
           gekozenKruispuntRichting = geforceerdeRichtingWaarde;
           geforceerdeRichting      = false;
-          Serial.print("Kruispunt (geforceerd na terugrijden) – richting: ");
+          SerialBT.print("Kruispunt (geforceerd) – richting: ");
         } else if (herhaalmodus && huidigLabyrinthIndex < aantalLabyrinthBeslissingen) {
           gekozenKruispuntRichting = labyrinthPad[huidigLabyrinthIndex++];
-          Serial.print("Kruispunt (herhaal) – richting: ");
+          SerialBT.print("Kruispunt (herhaal) – richting: ");
         } else {
           gekozenKruispuntRichting = bepaalKruispuntRichtingLinkseHand();
-          Serial.print("Kruispunt (verken) – richting: ");
+          SerialBT.print("Kruispunt (verken) – richting: ");
         }
-        Serial.println(gekozenKruispuntRichting);
+        SerialBT.println(gekozenKruispuntRichting);
 
-        // Sla beslissing op in verkenstand
         if (!herhaalmodus && aantalLabyrinthBeslissingen < MAX_LABYRINTH_BESLISSINGEN) {
           labyrinthPad[aantalLabyrinthBeslissingen++] = gekozenKruispuntRichting;
         }
@@ -802,12 +832,22 @@ void behandelKruispunt() {
     }
 
     case KF_WACHT_OP_LIJN: {
-      if (!alleSensorsWit()) {
+      bool lijnGevonden = false;
+      
+      // STRICT CENTERING FIX:
+      // Bij het draaien ('L' of 'R') wachten we verplicht tot de MIDDELSTE sensor (index 2) de lijn ziet.
+      if (gekozenKruispuntRichting == 'S') {
+        lijnGevonden = !alleSensorsWit();
+      } else {
+        lijnGevonden = sensorOpLijn[2]; 
+      }
+
+      if (lijnGevonden) {
         integraal  = 0.0;
         vorigeFout = 0.0;
         toestand   = LIJN_VOLGEN;
       } else {
-        // Blijf iets draaien/rijden om de lijn te vinden
+        // Blijf draaien tot de middelste sensor de lijn vindt
         if (gekozenKruispuntRichting == 'L' || gekozenKruispuntRichting == 'U') {
           motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
         } else if (gekozenKruispuntRichting == 'R') {
@@ -828,7 +868,7 @@ void behandelKruispunt() {
 // TERUGRIJDEN-toestand om terug naar het vorige kruispunt te rijden.
 // ============================================================
 void behandelDoodlopendEinde() {
-  Serial.println("Doodlopend einde – 180° draai uitvoeren...");
+  SerialBT.println("Doodlopend einde – 180° draai uitvoeren...");
 
   // Sla U-bocht op in labyrinthpad (verkenstand)
   if (!herhaalmodus && aantalLabyrinthBeslissingen < MAX_LABYRINTH_BESLISSINGEN) {
@@ -860,7 +900,7 @@ void behandelDoodlopendEinde() {
   lijnKwijtTimerGestart = false;
   kruispuntVerwerkt     = false;
 
-  Serial.println("180° draai voltooid – terugrijden naar vorig kruispunt...");
+  SerialBT.println("180° draai voltooid – terugrijden naar vorig kruispunt...");
   toestand = TERUGRIJDEN;
 }
 
@@ -873,43 +913,38 @@ void behandelDoodlopendEinde() {
 // op de originele hoofdlijn.
 // ============================================================
 void behandelTerugrijden() {
-  // --- Kruispunt-detectie (ook van de andere kant van een Y-splitsing) ---
-  // Standaard: beide buitensensoren op lijn.
-  // Extra: één buitensensor + midden + ≥3 sensoren (Y van de doodlopende kant).
-  bool kruispuntGezien = isKruispuntGedetecteerd();
-  if (!kruispuntGezien) {
-    int aantalOpLijn = 0;
-    for (int i = 0; i < 5; i++) if (sensorOpLijn[i]) aantalOpLijn++;
-    kruispuntGezien = (sensorOpLijn[0] || sensorOpLijn[4])
-                      && sensorOpLijn[2]
-                      && aantalOpLijn >= 3
-                      && !alleSensorsZwart();
+  // --- SUPER-GEVOELIGE KRUISPUNT-DETECTIE VOOR Y-MERGE ---
+  bool kruispuntGezien = false;
+  if ((sensorOpLijn[0] || sensorOpLijn[4]) && (sensorOpLijn[1] || sensorOpLijn[2] || sensorOpLijn[3])) {
+    kruispuntGezien = true;
   }
 
   if (kruispuntGezien) {
-    Serial.println("Vorig kruispunt bereikt – alternatieve route bepalen.");
+    Serial.println("Vorig kruispunt bereikt (Y-Merge) – alternatieve route bepalen.");
+    SerialBT.println("Y-Merge / Kruispunt bereikt op terugweg!");
 
-    // Bepaal de geforceerde richting op basis van de laatste opgeslagen beslissing.
-    // labyrinthPad eindigt op [..., <vorigeRichting>, 'U']
-    // Wis de 'U' en de vorige richting; KRUISPUNT voegt de nieuwe richting toe.
     if (!herhaalmodus && aantalLabyrinthBeslissingen >= 2 &&
         labyrinthPad[aantalLabyrinthBeslissingen - 1] == 'U') {
       char vorigeRichting = labyrinthPad[aantalLabyrinthBeslissingen - 2];
-      // Verwijder beide entries; KRUISPUNT voegt de nieuwe beslissing toe
-      aantalLabyrinthBeslissingen -= 2;
-      // Tegenovergestelde richting kiezen
-      if      (vorigeRichting == 'L') geforceerdeRichtingWaarde = 'R';
-      else if (vorigeRichting == 'R') geforceerdeRichtingWaarde = 'L';
+      aantalLabyrinthBeslissingen -= 2; // Wis de foute keuze
+      
+      // GEOMETRIE FIX: Draai L en R om op de terugweg
+      if      (vorigeRichting == 'L') geforceerdeRichtingWaarde = 'L'; 
+      else if (vorigeRichting == 'R') geforceerdeRichtingWaarde = 'R'; 
       else                            geforceerdeRichtingWaarde = 'U';
+      
       geforceerdeRichting = true;
-      Serial.print("Geforceerde richting (was ");
-      Serial.print(vorigeRichting);
-      Serial.print("): ");
-      Serial.println(geforceerdeRichtingWaarde);
+      SerialBT.print("Verplichte correctie-draai: ");
+      SerialBT.println(geforceerdeRichtingWaarde);
     }
 
     encoderLinksOpKruispunt  = encoderLinks;
     encoderRechtsOpKruispunt = encoderRechts;
+
+    kruispuntLinksOptie     = false;
+    kruispuntRechtdoorOptie = false;
+    kruispuntRechtsOptie    = false;
+    
     kruispuntFase      = KF_VOORUIT_CENTEREN;
     kruispuntStartTijd = millis();
     kruispuntVerwerkt  = false;
@@ -917,24 +952,21 @@ void behandelTerugrijden() {
     return;
   }
 
-  // Lijn kwijt tijdens terugrijden: draai naar laatste bekende richting
+  // --- Normaal Lijnzoeken/Volgen tijdens het terugrijden ---
   if (alleSensorsWit()) {
     zoekTeller++;
     if (zoekTeller > MAX_ZOEK_ITERATIES) {
-      Serial.println("Terugrijden: lijn niet gevonden – robot stopt.");
+      Serial.println("Gestopt: Lijn helemaal kwijt tijdens terugrijden.");
+      SerialBT.println("Gestopt: Lijn helemaal kwijt tijdens terugrijden.");
       motorStop();
       toestand = FINISH_BEREIKT;
       return;
     }
-    if (laatsteBekendeRichting <= 0) {
-      motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
-    } else {
-      motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);
-    }
+    if (laatsteBekendeRichting <= 0) motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
+    else                             motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);
     return;
   }
 
-  // Normaal lijnvolgen (terug naar vorig kruispunt)
   zoekTeller = 0;
   float positie   = berekenLijnPositie();
   float correctie = calculatePID(positie);
@@ -959,11 +991,11 @@ void slaOpLabyrinthPad() {
   voorkeuringen.putInt(NVS_SLEUTEL_AANTAL, aantalLabyrinthBeslissingen);
   voorkeuringen.end();
   if (geschrevenBytes != (size_t)aantalLabyrinthBeslissingen) {
-    Serial.println("FOUT: labyrinthpad kon niet volledig worden opgeslagen in NVS!");
+    SerialBT.println("FOUT: labyrinthpad kon niet volledig worden opgeslagen in NVS!");
   } else {
-    Serial.print("Labyrinthpad opgeslagen (");
-    Serial.print(aantalLabyrinthBeslissingen);
-    Serial.println(" beslissingen).");
+    SerialBT.print("Labyrinthpad opgeslagen (");
+    SerialBT.print(aantalLabyrinthBeslissingen);
+    SerialBT.println(" beslissingen).");
   }
 }
 
@@ -997,7 +1029,7 @@ void wisLabyrinthPad() {
   aantalLabyrinthBeslissingen = 0;
   huidigLabyrinthIndex        = 0;
   herhaalmodus                = false;
-  Serial.println("Labyrinthpad gewist – volgende run in verkenstand.");
+  SerialBT.println("Labyrinthpad gewist – volgende run in verkenstand.");
 }
 
 // ============================================================
@@ -1021,58 +1053,82 @@ void wisLabyrinthPad() {
 // ============================================================
 
 // Tijdsduren voor ontwijkingsmanoeuvre (ms) – aan te passen per robot.
-const int ONTWIJKING_ACHTERUIT_MS  =  300;
-const int ONTWIJKING_DRAAI90_MS    =  400;
-const int ONTWIJKING_ZIJWAARTS_MS  =  600;
-const int ONTWIJKING_OVERKANT_MS   =  700;
+const int DRAAI90 = 500; // VOORBEELD: pas dit aan naar jouw gevonden BT-waarde
+
+// --- Kalibratiewaarden voor 32mm wielen ---
+const float TICKS_PER_CM = 11.94; 
+
+// --- Ontwijkings-instellingen voor 20cm Cilinder (in Ticks) ---
+// We nemen een ruime bocht om de 20cm cilinder niet te raken
+const int ONTWIJK_AFSTAND_SCHUIN = (int)(20 * TICKS_PER_CM); // 18 cm schuin weg
+const int ONTWIJK_AFSTAND_RECHT  = (int)(32 * TICKS_PER_CM); // 28 cm langs het object
+const int ONTWIJK_DRAAI_HOEK     = (int)(TICKS_VOOR_180_GRADEN * 0.33); // Ca. 60 graden draai
 
 // Time-out voor het terugzoeken naar de lijn na obstakelontwijking
 const int LIJN_ZOEK_TIMEOUT_MS     = 3000;
 
 void avoidObstacle() {
-  Serial.println("Obstakelontwijking: start");
+  SerialBT.println("Obstakelontwijking: Start op basis van ticks");
+  
+  // We gebruiken deze variabelen om de afgelegde afstand per stap te meten
+  long startL, startR;
 
-  // 1. Stap achteruit
+  auto resetEncd = [&]() { 
+    startL = encoderLinks; 
+    startR = encoderRechts; 
+  };
+
+  auto wachtOpTicks = [&](int doelTicks) {
+    while (((encoderLinks - startL) + (encoderRechts - startR)) / 2 < doelTicks) {
+      delay(5); // Korte rust voor de processor
+    }
+  };
+
+  // 1. Stapje achteruit (optioneel, op tijd omdat het kort is)
   motorControl(-DRAAI_SNELHEID, -DRAAI_SNELHEID);
-  delay(ONTWIJKING_ACHTERUIT_MS);
+  delay(200);
 
-  // 2. Draai 90° links
+  // 2. Draai schuin weg
+  resetEncd();
   motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
-  delay(ONTWIJKING_DRAAI90_MS);
+  wachtOpTicks(ONTWIJK_DRAAI_HOEK);
 
-  // 3. Rij langs het obstakel (links erlangs)
+  // 3. Rij schuin langs de cilinder
+  resetEncd();
   motorControl(BASISSNELHEID, BASISSNELHEID);
-  delay(ONTWIJKING_ZIJWAARTS_MS);
+  wachtOpTicks(ONTWIJK_AFSTAND_SCHUIN);
 
-  // 4. Draai 90° rechts
+  // 4. Draai parallel aan de lijn
+  resetEncd();
   motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);
-  delay(ONTWIJKING_DRAAI90_MS);
+  wachtOpTicks(ONTWIJK_DRAAI_HOEK);
 
-  // 5. Rij over de breedte van het obstakel heen
+  // 5. Rij langs het object
+  resetEncd();
   motorControl(BASISSNELHEID, BASISSNELHEID);
-  delay(ONTWIJKING_OVERKANT_MS);
+  wachtOpTicks(ONTWIJK_AFSTAND_RECHT);
 
-  // 6. Draai 90° rechts
+  // 6. Draai schuin naar de lijn toe
+  resetEncd();
   motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);
-  delay(ONTWIJKING_DRAAI90_MS);
+  wachtOpTicks(ONTWIJK_DRAAI_HOEK);
 
-  // 7. Rij naar de lijn toe totdat een sensor de lijn vindt
-  Serial.println("Obstakelontwijking: zoeken naar lijn...");
-  unsigned long startTijd = millis();
+  // 7. Rij naar de lijn toe (tot sensoren zwart zien)
   motorControl(BASISSNELHEID, BASISSNELHEID);
+  unsigned long startZoek = millis();
   while (alleSensorsWit()) {
     readSensors();
-    if (millis() - startTijd > LIJN_ZOEK_TIMEOUT_MS) break;
-    delay(10);
+    if (millis() - startZoek > 5000) break; // Veiligheidstime-out
   }
 
-  // 8. Draai 90° links om op de lijn te richten
+  // 8. Korte correctie om weer recht op de lijn te komen
+  resetEncd();
   motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
-  delay(ONTWIJKING_DRAAI90_MS);
+  wachtOpTicks(ONTWIJK_DRAAI_HOEK / 2);
 
-  // Reset PID en hervat lijnvolgen
-  integraal  = 0.0;
+  // Hervat lijnvolgen
+  integraal = 0.0;
   vorigeFout = 0.0;
-  Serial.println("Obstakelontwijking: voltooid – lijnvolgen hervat");
   toestand = LIJN_VOLGEN;
+  SerialBT.println("Lijn teruggevonden.");
 }
