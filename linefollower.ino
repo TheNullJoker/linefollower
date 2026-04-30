@@ -629,9 +629,11 @@ void behandelLijnVolgen() {
     encoderLinksOpKruispunt  = encoderLinks;
     encoderRechtsOpKruispunt = encoderRechts;
 
-    kruispuntLinksOptie     = false;
-    kruispuntRechtdoorOptie = false;
-    kruispuntRechtsOptie    = false;
+    // Vastleggen op het detectiemoment: S1/S5 waren actief bij detectie – niet resetten!
+    // De robot beweegt 10 ms verder voor de volgende lus, waardoor de optie anders verloren gaat.
+    kruispuntLinksOptie     = sensorOpLijn[0] || sensorOpLijn[1];
+    kruispuntRechtdoorOptie = false;  // wordt bijgehouden tijdens het centreren
+    kruispuntRechtsOptie    = sensorOpLijn[3] || sensorOpLijn[4];
 
     kruispuntFase      = KF_VOORUIT_CENTEREN;
     kruispuntStartTijd = millis();
@@ -879,61 +881,50 @@ void behandelKruispunt() {
 
 // ============================================================
 // behandelDoodlopendEinde()
-// Draait maximaal 150° naar links om de lijn terug te vinden.
-// Als na 150° geen lijn gevonden is, schakelt de robot over naar
-// rechts draaien tot de lijn gevonden is of de time-out verstrijkt.
-// Dit voorkomt dat de robot meer dan 150° draait in één richting
-// en daardoor per ongeluk weer naar het doodlopend einde rijdt.
+// Draait eerst naar rechts (terug richting het vorige kruispunt)
+// tot een middelsensor de lijn ziet of de time-out verloopt.
+// Als rechts niets gevonden wordt, wordt links geprobeerd.
+// Gebruikt uitsluitend tijdsbegrensing – geen encoder-schatting,
+// omdat de encoder enkel vooruit betrouwbaar telt.
 // ============================================================
 void behandelDoodlopendEinde() {
-  SerialBT.println("Doodlopend einde – max 150° draaien, daarna andere kant...");
+  SerialBT.println("Doodlopend einde – draai rechts om lijn terug te vinden...");
 
   // Sla U-bocht op in labyrinthpad (verkenstand)
   if (!herhaalmodus && aantalLabyrinthBeslissingen < MAX_LABYRINTH_BESLISSINGEN) {
     labyrinthPad[aantalLabyrinthBeslissingen++] = 'U';
   }
 
-  // 150° in encoder-ticks (5/6 van 180° = 150/180 × TICKS_VOOR_180_GRADEN)
-  const long TICKS_150 = (TICKS_VOOR_180_GRADEN * 5L) / 6L;
-  // Fase 1 time-out: ruim genoeg voor de 150°-boog bij DRAAI_SNELHEID
-  const unsigned long DRAAI_FASE1_TIMEOUT_MS = 2000;
-  // Fase 2 time-out: robot swingt vanaf 150°-links terug naar rechts
-  const unsigned long DRAAI_FASE2_TIMEOUT_MS = 3000;
+  // Max draaitijd per richting: ruim genoeg voor een volledige 360° bij DRAAI_SNELHEID
+  const unsigned long DRAAI_TIMEOUT_MS = 3000UL;
 
-  // Fase 1: Draai links tot max 150° of lijn (midden-sensoren) gevonden
-  long startLinks  = encoderLinks;
-  long startRechts = encoderRechts;
-  motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
-  unsigned long draaiStartTijd = millis();
   bool lijnGevonden = false;
+  unsigned long draaiStart;
 
-  while (true) {
+  // Fase 1: Draai RECHTS (robot keert terug richting het vorige kruispunt)
+  motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);
+  draaiStart = millis();
+  while (millis() - draaiStart < DRAAI_TIMEOUT_MS) {
     readSensors();
     if (middenSensorenActief()) {
       lijnGevonden = true;
       break;
     }
-    long deltaLinks  = encoderLinks  - startLinks;
-    long deltaRechts = encoderRechts - startRechts;
-    long gemGedraaid = (deltaLinks + deltaRechts) / 2;
-    if (gemGedraaid >= TICKS_150 || millis() - draaiStartTijd > DRAAI_FASE1_TIMEOUT_MS) break;
-    delay(2);
+    yield();
   }
 
-  // Fase 2: lijn nog niet gevonden → schakel naar rechts draaien
+  // Fase 2: Niet gevonden rechts → probeer links
   if (!lijnGevonden) {
-    SerialBT.println("Lijn niet gevonden op 150° links – schakel naar rechts...");
-    motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);
-    draaiStartTijd = millis();
-
-    while (true) {
+    SerialBT.println("Lijn niet gevonden rechts – draai links...");
+    motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
+    draaiStart = millis();
+    while (millis() - draaiStart < DRAAI_TIMEOUT_MS) {
       readSensors();
       if (middenSensorenActief()) {
         lijnGevonden = true;
         break;
       }
-      if (millis() - draaiStartTijd > DRAAI_FASE2_TIMEOUT_MS) break;
-      delay(2);
+      yield();
     }
   }
 
@@ -1181,6 +1172,15 @@ void avoidObstacle() {
   resetEncd();
   motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
   wachtOpTicks(ONTWIJK_DRAAI_HOEK / 2);
+
+  // 9. Rij rechtdoor tot de lijn opnieuw gevonden is (geen rotatie!)
+  motorControl(BASISSNELHEID, BASISSNELHEID);
+  startZoek = millis();
+  while (alleSensorsWit()) {
+    readSensors();
+    if (millis() - startZoek > 5000) break; // Veiligheidstime-out
+    yield();
+  }
 
   // Hervat lijnvolgen
   integraal = 0.0;
