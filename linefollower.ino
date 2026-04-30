@@ -69,7 +69,7 @@ float Kd = 25.0;
 const int BASISSNELHEID  = 100;  // Verlaagd (was 120). Geeft de wielen meer tijd om grip te houden.
 const int MAX_SNELHEID   = 170; // Verlaagd (was 200). Voorkomt uitschieters in de bocht.
 const int MIN_SNELHEID   = 80; 
-const int DRAAI_SNELHEID = 140;
+const int DRAAI_SNELHEID = 110;
 const int OBSTAKEL_AFSTAND   = 15;  // cm – trigger obstakelontwijking
 
 // ------------------------------------------------------------
@@ -364,8 +364,9 @@ void loop() {
   }
 
   // De eigenlijke noodstop (triggert pas onder OBSTAKEL_AFSTAND, wat nu op 20cm staat)
+  // !alleSensorsZwart() voorkomt dat de finishbalk als obstakel gezien wordt.
   if (laatsteAfstand > 0.1 && laatsteAfstand < OBSTAKEL_AFSTAND && 
-      toestand == LIJN_VOLGEN) { // Alleen triggeren TIJDENS het rijden
+      toestand == LIJN_VOLGEN && !alleSensorsZwart()) { // Alleen triggeren TIJDENS het rijden, niet op de finish
     
     SerialBT.print("OBSTAKEL BEVESTIGD op ");
     SerialBT.print(laatsteAfstand);
@@ -595,9 +596,9 @@ void behandelLijnVolgen() {
     finishTeller = 0; 
   }
 
-  // --- Obstakelcontrole ---
+  // --- Obstakelcontrole (sla over als we op de finish staan) ---
   float afstand = meetAfstand();
-  if (afstand < OBSTAKEL_AFSTAND) {
+  if (afstand < OBSTAKEL_AFSTAND && !alleSensorsZwart()) {
     SerialBT.print("Obstakel gedetecteerd op ");
     SerialBT.print(afstand);
     SerialBT.println(" cm – ontwijken...");
@@ -1068,8 +1069,8 @@ const float TICKS_PER_CM = 11.94;
 
 // --- Ontwijkings-instellingen voor 20cm Cilinder (in Ticks) ---
 // We nemen een ruime bocht om de 20cm cilinder niet te raken
-const int ONTWIJK_AFSTAND_SCHUIN = (int)(18 * TICKS_PER_CM); // 18 cm schuin weg
-const int ONTWIJK_AFSTAND_RECHT  = (int)(28 * TICKS_PER_CM); // 28 cm langs het object
+const int ONTWIJK_AFSTAND_SCHUIN = (int)(20 * TICKS_PER_CM); // 20 cm schuin weg
+const int ONTWIJK_AFSTAND_RECHT  = (int)(32 * TICKS_PER_CM); // 32 cm langs het object
 const int ONTWIJK_DRAAI_HOEK     = (int)(TICKS_VOOR_180_GRADEN * 0.33); // Ca. 60 graden draai
 
 // Time-out voor het terugzoeken naar de lijn na obstakelontwijking
