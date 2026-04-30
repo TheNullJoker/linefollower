@@ -1182,6 +1182,15 @@ void avoidObstacle() {
   motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
   wachtOpTicks(ONTWIJK_DRAAI_HOEK / 2);
 
+  // 9. Rij rechtdoor tot de lijn opnieuw gevonden is (geen rotatie!)
+  motorControl(BASISSNELHEID, BASISSNELHEID);
+  startZoek = millis();
+  while (alleSensorsWit()) {
+    readSensors();
+    if (millis() - startZoek > 5000) break; // Veiligheidstime-out
+    yield();
+  }
+
   // Hervat lijnvolgen
   integraal = 0.0;
   vorigeFout = 0.0;
