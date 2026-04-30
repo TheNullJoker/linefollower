@@ -791,6 +791,7 @@ void behandelLijnZoeken() {
   }
 
   // Motoraansturing per fase
+  // Fasen 1, 3 en 4 draaien allemaal in de oorspronkelijke richting (B en D zijn spiegelbeweging)
   switch (zoekFase) {
     case 0:
       motorControl(BASISSNELHEID, BASISSNELHEID);
