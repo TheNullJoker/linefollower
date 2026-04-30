@@ -77,6 +77,7 @@ const int OBSTAKEL_AFSTAND   = 15;  // cm – trigger obstakelontwijking
 // ------------------------------------------------------------
 const unsigned long LIJN_KWIJT_DOODLOPEND_MS = 2500;  // ms lijn kwijt → doodlopend einde
 const long   TICKS_VOOR_180_GRADEN           = 377;   // Encoderticks voor 180° (kalibreren!)
+const long   TICKS_VOOR_120_GRADEN           = (long)((float)TICKS_VOOR_180_GRADEN * 120.0 / 180.0 + 0.5); // ~251 ticks voor 120°
 const int    MAX_LABYRINTH_BESLISSINGEN       = 50;    // Max. opgeslagen kruispuntbeslissingen
 
 // ------------------------------------------------------------
@@ -152,6 +153,22 @@ const int MAX_ZOEK_ITERATIES = 250;  // ~2.5 s bij 10 ms lus
 // ------------------------------------------------------------
 volatile long encoderLinks  = 0;
 volatile long encoderRechts = 0;
+
+// ------------------------------------------------------------
+// Globale vlag – obstakelontwijking per run
+// Wordt true nadat het obstakel één keer ontweekn is; reset op nieuwe run.
+// Niet opgeslagen in NVS (per-run only).
+// ------------------------------------------------------------
+bool obstakelOntweken = false;
+
+// ------------------------------------------------------------
+// U-turn hulpvariabelen (fase 1/2 tracking + start-encoders)
+// abs() op encoder-delta's voorkomt dat tegengestelde tekens
+// (vooruit/achteruit) elkaars bijdrage opheffen.
+// ------------------------------------------------------------
+bool uTurnReversed   = false;  // false = eerste fase (links), true = tweede fase (rechts)
+long uTurnStartEncL  = 0;      // Encoder-links bij start van huidige fase
+long uTurnStartEncR  = 0;      // Encoder-rechts bij start van huidige fase
 
 // ------------------------------------------------------------
 // Globale variabelen – knop (debounce + edge detect)
@@ -338,6 +355,8 @@ void loop() {
     if (!knopActieUitgevoerd && (millis() - knopIngedruktTijd > 50)) { // 50ms debounce
       if (toestand == WACHT_OP_START) {
         SerialBT.println("Robot start/hervat!");
+        obstakelOntweken = false;  // Obstacle avoidance opnieuw inschakelen voor deze run
+        SerialBT.println("Nieuw run gestart: obstacle avoidance re-enabled for this run.");
         toestand = LIJN_VOLGEN;
       } else {
         SerialBT.println("Robot PAUZE!");
@@ -365,14 +384,23 @@ void loop() {
 
   // De eigenlijke noodstop (triggert pas onder OBSTAKEL_AFSTAND, wat nu op 20cm staat)
   // !alleSensorsZwart() voorkomt dat de finishbalk als obstakel gezien wordt.
+  // !obstakelOntweken: er is slechts één obstakel per baan; na één ontwijking is avoidance uitgeschakeld.
   if (laatsteAfstand > 0.1 && laatsteAfstand < OBSTAKEL_AFSTAND && 
-      toestand == LIJN_VOLGEN && !alleSensorsZwart()) { // Alleen triggeren TIJDENS het rijden, niet op de finish
+      toestand == LIJN_VOLGEN && !alleSensorsZwart() && !obstakelOntweken) { // Alleen triggeren TIJDENS het rijden, niet op de finish
     
     SerialBT.print("OBSTAKEL BEVESTIGD op ");
     SerialBT.print(laatsteAfstand);
     SerialBT.println(" cm. Start ontwijking...");
     
     toestand = OBSTAKEL_ONTWIJKEN;
+  } else if (obstakelOntweken && laatsteAfstand > 0.1 && laatsteAfstand < OBSTAKEL_AFSTAND &&
+             toestand == LIJN_VOLGEN && !alleSensorsZwart()) {
+    // Onderdruk herhaalde ontwijking – maximaal eén keer per BT-bericht (throttle)
+    static unsigned long laatsteOnderdruktPrint = 0;
+    if (nu - laatsteOnderdruktPrint > 1000) {
+      SerialBT.println("Obstacle detected but avoidance disabled for this run (already dodged).");
+      laatsteOnderdruktPrint = nu;
+    }
   }
 
   // 4. Toestandsmachine uitvoeren
@@ -591,7 +619,10 @@ void behandelLijnVolgen() {
   
   if (alleSensorsZwart()) {
     finishTeller++;
-    if (finishTeller >= 15) { // 15 x 10ms lus = 150ms continu zwart
+    if (finishTeller == 15) {
+      SerialBT.println("Finish: halfway to debounce (150 ms)...");
+    }
+    if (finishTeller >= 30) { // 30 x 10ms lus = 300ms continu zwart
       slaOpLabyrinthPad();
       SerialBT.println("FINISH gedetecteerd – pad opgeslagen, robot stopt!");
       motorStop();
@@ -815,6 +846,13 @@ void behandelKruispunt() {
 
         kruispuntFase      = KF_DRAAIEN;
         kruispuntStartTijd = millis();
+
+        // Initialiseer U-turn hulpstatus bij het starten van de draai
+        if (gekozenKruispuntRichting == 'U') {
+          uTurnReversed  = false;
+          uTurnStartEncL = encoderLinks;
+          uTurnStartEncR = encoderRechts;
+        }
       }
       break;
     }
@@ -829,13 +867,46 @@ void behandelKruispunt() {
         motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);
         draaiKlaar = (millis() - kruispuntStartTijd >= KRUISPUNT_DRAAI_MS);
       } else if (gekozenKruispuntRichting == 'U') {
-        // U-bocht: gebruik gemiddelde van beide encoders voor nauwkeurige 180°
-        motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
-        long deltaLinks  = encoderLinks  - encoderLinksOpKruispunt;
-        long deltaRechts = encoderRechts - encoderRechtsOpKruispunt;
-        long gemGedraaid = (deltaLinks + deltaRechts) / 2;
-        draaiKlaar = (gemGedraaid >= TICKS_VOOR_180_GRADEN) ||
-                     (millis() - kruispuntStartTijd >= KRUISPUNT_DRAAI_MS * 2);
+        // U-bocht: twee fasen van elk max 120°, met absolute encoder-delta's
+        // (abs() voorkomt dat tegengestelde tekens bij voor-/achteruitrijden zich opheffen)
+        if (!uTurnReversed) {
+          // Fase 1: draai links
+          motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
+          long deltaLinks  = abs(encoderLinks  - uTurnStartEncL);
+          long deltaRechts = abs(encoderRechts - uTurnStartEncR);
+          long gemGedraaid = (deltaLinks + deltaRechts) / 2;
+          if (gemGedraaid >= TICKS_VOOR_120_GRADEN) {
+            // 120° bereikt → wacht op lijn
+            SerialBT.print("U-turn fase 1: 120 graden links gedraaid (delta L=");
+            SerialBT.print(deltaLinks); SerialBT.print(", R=");
+            SerialBT.print(deltaRechts); SerialBT.println(") -> wacht op lijn.");
+            kruispuntFase = KF_WACHT_OP_LIJN;
+          } else if (millis() - kruispuntStartTijd >= max((unsigned long)KRUISPUNT_DRAAI_MS * 3, (unsigned long)1000)) {
+            // Time-out fase 1 → wissel naar rechts en reset encoderstarts
+            uTurnReversed  = true;
+            uTurnStartEncL = encoderLinks;
+            uTurnStartEncR = encoderRechts;
+            kruispuntStartTijd = millis();
+            SerialBT.println("U-turn: no line after 120 deg left; reversing direction.");
+          }
+        } else {
+          // Fase 2: draai rechts
+          motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);
+          long deltaLinks2  = abs(encoderLinks  - uTurnStartEncL);
+          long deltaRechts2 = abs(encoderRechts - uTurnStartEncR);
+          long gemGedraaid2 = (deltaLinks2 + deltaRechts2) / 2;
+          if (gemGedraaid2 >= TICKS_VOOR_120_GRADEN) {
+            // 120° bereikt in tweede fase → wacht op lijn
+            SerialBT.print("U-turn fase 2: 120 graden rechts gedraaid (delta L=");
+            SerialBT.print(deltaLinks2); SerialBT.print(", R=");
+            SerialBT.print(deltaRechts2); SerialBT.println(") -> wacht op lijn.");
+            kruispuntFase = KF_WACHT_OP_LIJN;
+          } else if (millis() - kruispuntStartTijd >= max((unsigned long)KRUISPUNT_DRAAI_MS * 3, (unsigned long)1500)) {
+            // Definitieve time-out → ga naar wachtfase zodat andere logica kan oppikken
+            SerialBT.println("U-turn: timed out after reversing; entering wait phase.");
+            kruispuntFase = KF_WACHT_OP_LIJN;
+          }
+        }
       } else {
         // Rechtdoor ('S'): kort doorrijden
         motorControl(BASISSNELHEID, BASISSNELHEID);
@@ -866,8 +937,16 @@ void behandelKruispunt() {
         toestand   = LIJN_VOLGEN;
       } else {
         // Blijf draaien tot een middelste sensor de lijn vindt
-        if (gekozenKruispuntRichting == 'L' || gekozenKruispuntRichting == 'U') {
+        if (gekozenKruispuntRichting == 'L') {
           motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
+        } else if (gekozenKruispuntRichting == 'U') {
+          // Draai in de richting van de huidige U-turn fase:
+          // fase 1 (niet omgekeerd) = links; fase 2 (omgekeerd) = rechts
+          if (!uTurnReversed) {
+            motorControl(-DRAAI_SNELHEID, DRAAI_SNELHEID);
+          } else {
+            motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);
+          }
         } else if (gekozenKruispuntRichting == 'R') {
           motorControl(DRAAI_SNELHEID, -DRAAI_SNELHEID);
         } else {
@@ -1185,6 +1264,8 @@ void avoidObstacle() {
   // Hervat lijnvolgen
   integraal = 0.0;
   vorigeFout = 0.0;
+  obstakelOntweken = true;  // Slechts één obstakel per baan: verdere ontwijking uitgeschakeld
+  SerialBT.println("Obstakel ontwijking voltooid; verdere ontwijking uitgeschakeld voor deze run.");
   toestand = LIJN_VOLGEN;
   SerialBT.println("Lijn teruggevonden.");
 }
