@@ -1105,12 +1105,12 @@ const float TICKS_PER_CM = 11.94;
 
 // --- Ontwijkings-instellingen voor 20cm Cilinder (in Ticks) ---
 // We nemen een ruime bocht om de 20cm cilinder niet te raken
-const int ONTWIJK_AFSTAND_SCHUIN = (int)(20 * TICKS_PER_CM); // 20 cm schuin weg
-const int ONTWIJK_AFSTAND_RECHT  = (int)(32 * TICKS_PER_CM); // 32 cm langs het object
+const int ONTWIJK_AFSTAND_SCHUIN = (int)(22 * TICKS_PER_CM); // 20 cm schuin weg
+const int ONTWIJK_AFSTAND_RECHT  = (int)(45 * TICKS_PER_CM); // 32 cm langs het object
 const int ONTWIJK_DRAAI_HOEK     = (int)(TICKS_VOOR_180_GRADEN * 0.33); // Ca. 60 graden draai
 
 // Time-out voor het terugzoeken naar de lijn na obstakelontwijking
-const int LIJN_ZOEK_TIMEOUT_MS     = 3000;
+const int LIJN_ZOEK_TIMEOUT_MS     = 3500;
 
 void avoidObstacle() {
   SerialBT.println("Obstakelontwijking: Start op basis van ticks");
