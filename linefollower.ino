@@ -76,9 +76,10 @@ const int OBSTAKEL_AFSTAND   = 15;  // cm – trigger obstakelontwijking
 // Doodlopend einde / labyrinth-constanten
 // ------------------------------------------------------------
 const unsigned long LIJN_KWIJT_DOODLOPEND_MS = 5000;  // ms lijn kwijt → doodlopend einde (verhoogd van 2500 naar 5000)
+const unsigned long LIJN_KWIJT_DEBOUNCE_MS   = 500;   // ms alle sensoren wit → wacht voor LIJN_ZOEKEN (geeft robot tijd om lijn te hervatten)
 
 // Sweep-faseduurtijden voor LIJN_ZOEKEN (ms, tunable)
-const unsigned long ZOEK_FASE_A_MS  = 200;   // Fase A: rechtdoor rijden
+const unsigned long ZOEK_FASE_A_MS  = 400;   // Fase A: rechtdoor rijden (verhoogd van 200 voor meer zoektijd voor sweepen)
 const unsigned long ZOEK_FASE_B_MS  = 400;   // Fase B: draaien naar laatste bekende richting
 const unsigned long ZOEK_FASE_C_MS  = 750;   // Fase C: draaien naar tegenovergestelde richting
 const unsigned long ZOEK_FASE_D_MS  = 1050;  // Fase D: draaien terug naar oorspronkelijke richting
@@ -190,10 +191,12 @@ unsigned long knopIngedruktSinds      = 0;   // Voor lang-indruk detectie
 // ------------------------------------------------------------
 // Globale variabelen – doodlopend einde (dead end)
 // ------------------------------------------------------------
-unsigned long lijnKwijtTijd          = 0;
-bool          lijnKwijtTimerGestart  = false;
-bool          sweepCyclusVoltooid    = false;  // true als minstens één volledige sweep doorlopen is
-int           vorigZoekFase          = -1;     // Voor detectie faseovergang (BT-log throttling)
+unsigned long lijnKwijtTijd              = 0;
+bool          lijnKwijtTimerGestart      = false;
+bool          sweepCyclusVoltooid        = false;  // true als minstens één volledige sweep doorlopen is
+int           vorigZoekFase              = -1;     // Voor detectie faseovergang (BT-log throttling)
+unsigned long lijnKwijtDebounceStartTijd = 0;      // Tijdstip waarop alle sensoren voor het eerst wit werden
+bool          lijnKwijtDebounceGestart   = false;  // true zolang debounce-periode loopt
 
 // ------------------------------------------------------------
 // Globale variabelen – kruispunt-verwerking
@@ -647,16 +650,32 @@ void behandelLijnVolgen() {
   // --- Obstakelcontrole: gebruik gecachete afstand uit loop() – geen extra blokkerende meting ---
   // (de obstakel-override in loop() handelt de overgang naar OBSTAKEL_ONTWIJKEN al af)
 
-  // --- Lijn kwijt → overschakelen naar zoeken ---
+  // --- Lijn kwijt → debounce, dan overschakelen naar zoeken ---
   if (alleSensorsWit()) {
-    lijnKwijtTijd         = millis();
-    lijnKwijtTimerGestart = true;
-    zoekTeller            = 0;
-    sweepCyclusVoltooid   = false;
-    vorigZoekFase         = -1;
-    toestand              = LIJN_ZOEKEN;
+    if (!lijnKwijtDebounceGestart) {
+      lijnKwijtDebounceStartTijd = millis();
+      lijnKwijtDebounceGestart   = true;
+      SerialBT.println("Lijn kwijt – debounce gestart, rij naar laatste bekende richting.");
+    }
+    // Stuur naar de laatste bekende richting zolang de debounce-periode loopt
+    if (millis() - lijnKwijtDebounceStartTijd < LIJN_KWIJT_DEBOUNCE_MS) {
+      if      (laatsteBekendeRichting < 0) motorControl(MIN_SNELHEID, DRAAI_SNELHEID);
+      else if (laatsteBekendeRichting > 0) motorControl(DRAAI_SNELHEID, MIN_SNELHEID);
+      else                                  motorControl(BASISSNELHEID, BASISSNELHEID);
+      return;
+    }
+    // Debounce verlopen → overschakelen naar LIJN_ZOEKEN
+    lijnKwijtDebounceGestart = false;
+    lijnKwijtTijd            = millis();
+    lijnKwijtTimerGestart    = true;
+    zoekTeller               = 0;
+    sweepCyclusVoltooid      = false;
+    vorigZoekFase            = -1;
+    toestand                 = LIJN_ZOEKEN;
     return;
   }
+  // Lijn (weer) gevonden – reset debounce
+  lijnKwijtDebounceGestart = false;
 
   // --- Kruispunt-detectie: buitenste sensoren beide op lijn ---
   // (Y-kruispunt, T-kruising of volledige kruising)
